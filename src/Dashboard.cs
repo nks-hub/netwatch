@@ -271,9 +271,9 @@ namespace NetWatch
                 outp.Add(new Line("SPEEDTEST    error " + sp.Error + "  (" + Local(sp.Time) + ")", ConsoleColor.Red));
                 return;
             }
-            // Real result — horizontal bar gauges on a shared auto-scale. The bar shrinks on
-            // narrow consoles so the numeric value/max (the part that matters) is never clipped.
-            int Cells = Math.Max(8, Math.Min(24, width - 40));
+            // Real result — a titled rounded-box card consistent with the dashboard header.
+            int inner = Math.Max(0, Math.Min(66, width - 2)); // same geometry as the title card
+            int cw = Math.Max(0, inner - 2);                   // content width inside "│ " ... " │"
 
             double down = (!double.IsNaN(sp.DownMbps) && sp.DownMbps > 0) ? sp.DownMbps : 0;
             double up = (!double.IsNaN(sp.UpMbps) && sp.UpMbps > 0) ? sp.UpMbps : 0;
@@ -281,55 +281,96 @@ namespace NetWatch
             double maxUp = (!double.IsNaN(snap.MaxUpMbps) && snap.MaxUpMbps > 0) ? snap.MaxUpMbps : 0;
             double avgDown = double.IsNaN(snap.AvgDownMbps) ? 0 : snap.AvgDownMbps;
             double avgUp = double.IsNaN(snap.AvgUpMbps) ? 0 : snap.AvgUpMbps;
-
             double peak = Math.Max(Math.Max(down, up), Math.Max(maxDown, maxUp));
             double scaleMax = NiceCeil(peak);
 
-            outp.Add(new Line("SPEEDTEST", ConsoleColor.White));
-            outp.Add(new Line(SpeedBar("↓ down", down, maxDown, scaleMax, Cells), ConsoleColor.Cyan));
-            outp.Add(new Line(SpeedBar("↑ up  ", up, maxUp, scaleMax, Cells), ConsoleColor.Green));
+            string hhmmss = sp.Time.ToLocalTime().ToString("HH:mm:ss", CultureInfo.InvariantCulture);
 
-            var axis = new StringBuilder();
-            axis.Append("  scale 0").Append('─', Cells - 4).Append(Num(scaleMax));
-            axis.Append("   avg ↓ ").Append(Num(avgDown)).Append(" / ↑ ").Append(Num(avgUp));
-            if (snap.SpeedCount > 0)
-                axis.Append(" · ").Append(snap.SpeedCount.ToString(CultureInfo.InvariantCulture))
-                    .Append(snap.SpeedCount == 1 ? " test" : " tests");
-            outp.Add(new Line(axis.ToString(), ConsoleColor.DarkGray));
+            // Top border carries the title; bottom border carries the test time.
+            outp.Add(new Line(TitledBorder('╭', '╮', " SPEEDTEST ", inner), ConsoleColor.DarkCyan));
 
+            // Down / up rows: label, right-aligned value, then a gauge on the shared scale.
+            const int labelW = 8, valW = 12, gap = 2;
+            int barCells = Math.Max(4, cw - labelW - valW - gap);
+            outp.Add(new Line(Card(Fit("↓ DOWN", labelW) + PadLeft(Num(down) + " Mbps", valW) + "  " +
+                                    Bar(down, maxDown, scaleMax, barCells), cw), ConsoleColor.Cyan));
+            outp.Add(new Line(Card(Fit("↑ UP", labelW) + PadLeft(Num(up) + " Mbps", valW) + "  " +
+                                    Bar(up, maxUp, scaleMax, barCells), cw), ConsoleColor.Green));
+
+            // Dotted-leader scale line (replaces the crude "scale 0───200").
+            string scaleLabel = "scale 0 ─ " + Num(scaleMax) + " Mbps";
+            int dots = Math.Max(0, cw - scaleLabel.Length - 1);
+            outp.Add(new Line(Card(new string('·', dots) + " " + scaleLabel, cw), ConsoleColor.DarkGray));
+
+            // Latency / jitter / server (the whole row recolours when latency is high).
             double lat = double.IsNaN(sp.LatencyMs) ? 0 : sp.LatencyMs;
             double jit = double.IsNaN(sp.JitterMs) ? 0 : sp.JitterMs;
             ConsoleColor latColor = lat >= cfg.HighLatencyMs ? ConsoleColor.Red
-                                  : lat >= cfg.HighLatencyMs * 0.4 ? ConsoleColor.Yellow
-                                  : ConsoleColor.Gray;
+                                  : lat >= cfg.HighLatencyMs * 0.4 ? ConsoleColor.Yellow : def;
+            var ljs = new StringBuilder();
+            ljs.Append("latency  ").Append(Num(lat)).Append(" ms");
+            ljs.Append("    jitter  ±").Append(Num(jit)).Append(" ms");
+            if (!string.IsNullOrEmpty(sp.Server)) ljs.Append("    server  ").Append(sp.Server);
+            outp.Add(new Line(Card(ljs.ToString(), cw), latColor));
 
-            var info = new StringBuilder();
-            info.Append("  lat ").Append(Num(lat)).Append(" ±").Append(Num(jit)).Append(" ms");
-            if (!string.IsNullOrEmpty(sp.Server)) info.Append(" · ").Append(sp.Server);
-            info.Append(" · ").Append(Local(sp.Time));
+            // Session averages, test count and next-test countdown.
+            var ag = new StringBuilder();
+            ag.Append("avg ↓ ").Append(Num(avgDown)).Append(" / ↑ ").Append(Num(avgUp)).Append(" Mbps");
+            if (snap.SpeedCount > 0)
+                ag.Append("    ").Append(snap.SpeedCount.ToString(CultureInfo.InvariantCulture))
+                  .Append(snap.SpeedCount == 1 ? " test" : " tests");
             if (cfg.SpeedtestEnabled && cfg.SpeedtestIntervalMin > 0)
             {
                 DateTime nextUtc = ToUtc(sp.Time).AddMinutes(cfg.SpeedtestIntervalMin);
                 TimeSpan rem = nextUtc - DateTime.UtcNow;
                 if (rem < TimeSpan.Zero) rem = TimeSpan.Zero;
-                info.Append(" · next in ").Append(((int)rem.TotalMinutes).ToString(CultureInfo.InvariantCulture)).Append('m');
+                ag.Append(" · next in ").Append(((int)rem.TotalMinutes).ToString(CultureInfo.InvariantCulture)).Append('m');
             }
-            outp.Add(new Line(info.ToString(), latColor));
+            outp.Add(new Line(Card(ag.ToString(), cw), ConsoleColor.DarkGray));
+
+            outp.Add(new Line(TitledBorder('╰', '╯', " " + hhmmss + " ", inner), ConsoleColor.DarkCyan));
         }
 
-        // One gauge row: "  <label>  <bar>  <value> Mbps   max <peak>", with a '┊' tick
-        // marking the session-max position on the shared scale.
-        private static string SpeedBar(string label, double value, double sessionMax, double scaleMax, int cells)
+        // A content row inside a card box: "│ " + content fitted to exact width + " │".
+        private static string Card(string content, int contentWidth)
         {
+            return "│ " + Fit(content, contentWidth) + " │";
+        }
+
+        // A box border carrying an inline title, e.g. "╭─ SPEEDTEST ──────╮", total width
+        // = inner + 2. Falls back to a plain border when the console is too narrow.
+        private static string TitledBorder(char left, char right, string title, int inner)
+        {
+            if (inner < title.Length + 3)
+                return left + new string('─', Math.Max(0, inner)) + right;
+            int dashes = inner - 1 - title.Length;
+            if (dashes < 0) dashes = 0;
+            return left + "─" + title + new string('─', dashes) + right;
+        }
+
+        // Right-justify s within width (keep the rightmost chars when longer).
+        private static string PadLeft(string s, int width)
+        {
+            s = s ?? "";
+            if (s.Length >= width) return s.Length > width ? s.Substring(s.Length - width) : s;
+            return new string(' ', width - s.Length) + s;
+        }
+
+        // A gauge of <cells> █/░ cells with a '┊' tick at the session-max position, shown
+        // only when the session peak meaningfully exceeds the current value.
+        private static string Bar(double value, double sessionMax, double scaleMax, int cells)
+        {
+            if (cells < 1) return "";
             if (scaleMax <= 0) scaleMax = 1;
             if (value < 0) value = 0;
             int filled = (int)Math.Round(value / scaleMax * cells);
             if (filled < 0) filled = 0; else if (filled > cells) filled = cells;
             int markPos = -1;
-            if (sessionMax > value)
+            if (sessionMax > value * 1.02 && sessionMax > value + 0.5)
             {
                 markPos = (int)Math.Round(sessionMax / scaleMax * cells);
                 if (markPos > cells - 1) markPos = cells - 1;
+                if (markPos < 0) markPos = 0;
             }
             var bar = new StringBuilder(cells);
             for (int i = 0; i < cells; i++)
@@ -338,11 +379,7 @@ namespace NetWatch
                 else if (i == markPos) bar.Append('┊');
                 else bar.Append('░');
             }
-            var sb = new StringBuilder();
-            sb.Append("  ").Append(label).Append("  ").Append(bar);
-            sb.Append("  ").Append(Pad(Num(value), 7)).Append("Mbps");
-            if (sessionMax > 0) sb.Append("   max ").Append(Num(sessionMax));
-            return sb.ToString();
+            return bar.ToString();
         }
 
         // Round a positive value up to a readable 1/2/5×10^n ceiling so the shared bar
