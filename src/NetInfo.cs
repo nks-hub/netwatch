@@ -228,6 +228,7 @@ namespace NetWatch
 
                 int ifIndex = -1;
                 string ownIp = pick.IpAddress;
+                System.Net.IPAddress ownMask = null;
 
                 foreach (var nic in NetworkInterface.GetAllNetworkInterfaces())
                 {
@@ -243,18 +244,15 @@ namespace NetWatch
                         if (v4 == null) continue;
                         ifIndex = v4.Index;
 
-                        // Prefer the adapter's own IPv4 from the live enumeration if the sample
-                        // didn't carry one, so the "next hop != own IP" guard stays accurate.
-                        if (string.IsNullOrEmpty(ownIp))
+                        // Capture the adapter's own IPv4 + subnet mask from the live enumeration.
+                        foreach (var ua in props.UnicastAddresses)
                         {
-                            foreach (var ua in props.UnicastAddresses)
+                            if (ua.Address != null &&
+                                ua.Address.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork)
                             {
-                                if (ua.Address != null &&
-                                    ua.Address.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork)
-                                {
-                                    ownIp = ua.Address.ToString();
-                                    break;
-                                }
+                                if (string.IsNullOrEmpty(ownIp)) ownIp = ua.Address.ToString();
+                                try { ownMask = ua.IPv4Mask; } catch { }
+                                break;
                             }
                         }
                         break;
@@ -266,12 +264,76 @@ namespace NetWatch
                 }
 
                 if (ifIndex < 0) return null;
-                return LookupRouteGateway(ifIndex, ownIp);
+
+                // Prefer a real off-link next hop from the route table (full-tunnel VPNs such
+                // as Fortinet SSL VPN expose one).
+                string viaRoute = LookupRouteGateway(ifIndex, ownIp);
+                if (!string.IsNullOrEmpty(viaRoute)) return viaRoute;
+
+                // Fall back to the first host of the adapter's on-link tunnel subnet (the
+                // conventional tunnel server, e.g. .1) for split-tunnel /24 peers that expose no
+                // gateway (WireGuard-style). Derived from the live subnet, never hardcoded.
+                return DeriveSubnetGateway(ownIp, ownMask);
             }
             catch
             {
                 return null;
             }
+        }
+
+        /// <summary>
+        /// Derives the first usable host of an IPv4 subnet (network address + 1) — the
+        /// conventional tunnel-server address for an on-link VPN subnet. Returns null when
+        /// the inputs are unusable, the subnet is too small (/31, /32), or the first host
+        /// equals the adapter's own address or the broadcast. Pure byte arithmetic, no guessing
+        /// of a specific operator value.
+        /// </summary>
+        private static string DeriveSubnetGateway(string ip, System.Net.IPAddress mask)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(ip) || mask == null) return null;
+                System.Net.IPAddress ipa;
+                if (!System.Net.IPAddress.TryParse(ip, out ipa)) return null;
+                byte[] ib = ipa.GetAddressBytes();
+                byte[] mb = mask.GetAddressBytes();
+                if (ib.Length != 4 || mb.Length != 4) return null;
+
+                int prefix = 0; bool stop = false;
+                foreach (var x in mb)
+                {
+                    for (int bit = 7; bit >= 0 && !stop; bit--)
+                    {
+                        if ((x & (1 << bit)) != 0) prefix++; else stop = true;
+                    }
+                    if (stop) break;
+                }
+                if (prefix == 0 || prefix >= 31) return null;
+
+                var net = new byte[4];
+                var bc = new byte[4];
+                for (int i = 0; i < 4; i++)
+                {
+                    net[i] = (byte)(ib[i] & mb[i]);
+                    bc[i] = (byte)(net[i] | (~mb[i] & 0xFF));
+                }
+                var first = (byte[])net.Clone();
+                int carry = 1;
+                for (int i = 3; i >= 0 && carry > 0; i--)
+                {
+                    int v = first[i] + carry; first[i] = (byte)(v & 0xFF); carry = v >> 8;
+                }
+                if (SameBytes(first, ib) || SameBytes(first, bc)) return null;
+                return first[0] + "." + first[1] + "." + first[2] + "." + first[3];
+            }
+            catch { return null; }
+        }
+
+        private static bool SameBytes(byte[] a, byte[] b)
+        {
+            if (a == null || b == null || a.Length != b.Length) return false;
+            for (int i = 0; i < a.Length; i++) if (a[i] != b[i]) return false;
+            return true;
         }
 
         /// <summary>

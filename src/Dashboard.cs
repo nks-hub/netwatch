@@ -106,8 +106,12 @@ namespace NetWatch
                            up.Minutes.ToString("00", CultureInfo.InvariantCulture) + ":" +
                            up.Seconds.ToString("00", CultureInfo.InvariantCulture);
             string now = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture);
-            outp.Add(new Line("NetWatch v1.0  up " + upStr + "  " + now + "   log:" + (cfg.LogDir ?? "logs"), ConsoleColor.White));
-            outp.Add(new Line(Repo + "   " + Author, ConsoleColor.DarkGray));
+            int inner = Math.Min(64, Math.Max(40, width - 2));
+            outp.Add(new Line("╭" + new string('─', inner) + "╮", ConsoleColor.DarkCyan));
+            outp.Add(new Line("│ " + Fit("NetWatch v1.0    network & VPN latency diagnostics", inner - 2) + " │", ConsoleColor.Cyan));
+            outp.Add(new Line("│ " + Fit("by " + Author + "   ·   github.com/nks-hub/netwatch", inner - 2) + " │", ConsoleColor.DarkGray));
+            outp.Add(new Line("╰" + new string('─', inner) + "╯", ConsoleColor.DarkCyan));
+            outp.Add(new Line(" up " + upStr + "    " + now + "    log: " + (cfg.LogDir ?? "logs"), def));
             outp.Add(new Line("", def));
 
             // Active link
@@ -363,6 +367,20 @@ namespace NetWatch
                 // Don't split a surrogate pair (would render a broken glyph).
                 if (cut > 0 && cut < s.Length && char.IsHighSurrogate(s[cut - 1])) cut--;
                 return s.Substring(0, cut).PadRight(width - 1) + " ";
+            }
+            return s + new string(' ', width - s.Length);
+        }
+
+        // Truncate or right-pad to exactly width characters (for fixed-width box content).
+        private static string Fit(string s, int width)
+        {
+            s = s ?? "";
+            if (width <= 0) return "";
+            if (s.Length > width)
+            {
+                int cut = width;
+                if (cut > 0 && char.IsHighSurrogate(s[cut - 1])) cut--;
+                return s.Substring(0, cut).PadRight(width);
             }
             return s + new string(' ', width - s.Length);
         }
