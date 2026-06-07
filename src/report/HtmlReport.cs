@@ -22,8 +22,9 @@ namespace NetWatch.Report
     public static class HtmlReport
     {
         // ---- chart geometry / bucketing tuning ----
-        private const int ChartWidth = 760;
-        private const int ChartHeight = 240;
+        // Bigger viewBox so each chart is large and readable in the 2-per-row grid.
+        private const int ChartWidth = 860;
+        private const int ChartHeight = 320;
         private const int TargetPoints = 150; // aim ~120-180 points per chart
 
         // ---- the three time windows (seconds) ----
@@ -485,7 +486,10 @@ namespace NetWatch.Report
             foreach (var s in series)
             {
                 if (s == null) continue;
-                sb.Append("<span class=\"li\">");
+                // data-nw-toggle carries the series label so the JS can click-toggle /
+                // hover-emphasise the matching g.nw-series across every chart in the card.
+                sb.Append("<span class=\"li\" role=\"button\" tabindex=\"0\" data-nw-toggle=\"")
+                  .Append(Esc(s.Label ?? "")).Append("\">");
                 sb.Append("<i style=\"background:").Append(Esc(s.Color ?? "#888")).Append("\"></i>");
                 sb.Append(Esc(s.Label ?? ""));
                 sb.Append("</span>");
@@ -766,8 +770,17 @@ namespace NetWatch.Report
 
         private static string Js()
         {
+            // One vanilla-JS IIFE, no external libraries. Two responsibilities:
+            //   (1) the global time-range segmented control (+ localStorage), and
+            //   (2) full chart interactivity driven entirely by the data-* contract
+            //       that SvgChart emits (svg.nw-chart with data-l/t/w/h, data-xfrom/
+            //       data-xto, data-ymin/data-ymax, data-unit; and g.nw-series with
+            //       data-label/data-color/data-points="epochMs,value ...").
+            // Re-runs cleanly on every load, so the 60s meta-refresh keeps it wired.
             return
                 "(function(){" +
+
+                // ---------- (1) global range toggle ----------
                 "var KEY='netwatch.range';" +
                 "var VALID={'5m':1,'60m':1,'24h':1};" +
                 "var ranged=document.getElementById('ranged');" +
@@ -780,13 +793,151 @@ namespace NetWatch.Report
                 "segs[i].classList.toggle('active',on);" +
                 "segs[i].setAttribute('aria-selected',on?'true':'false');}" +
                 "}" +
-                "function load(){var r='60m';try{var s=localStorage.getItem(KEY);if(s&&VALID[s])r=s;}catch(e){}return r;}" +
-                "function save(r){try{localStorage.setItem(KEY,r);}catch(e){}}" +
+                "function loadR(){var r='60m';try{var s=localStorage.getItem(KEY);if(s&&VALID[s])r=s;}catch(e){}return r;}" +
+                "function saveR(r){try{localStorage.setItem(KEY,r);}catch(e){}}" +
                 "for(var i=0;i<segs.length;i++){(function(b){" +
-                "b.addEventListener('click',function(){var r=b.getAttribute('data-range');apply(r);save(r);});" +
+                "b.addEventListener('click',function(){var r=b.getAttribute('data-range');apply(r);saveR(r);});" +
                 "})(segs[i]);}" +
-                // Restore on load so the chosen range survives the meta-refresh.
-                "apply(load());" +
+                "apply(loadR());" +
+
+                // ---------- (2) chart interactivity ----------
+                "var SVGNS='http://www.w3.org/2000/svg';" +
+                // Shared tooltip div: create once, reuse for every chart.
+                "var tip=document.createElement('div');tip.className='nw-tip';" +
+                "document.body.appendChild(tip);" +
+
+                // Parse a series' data-points into a sorted [{t,v}] array (cached on the <g>).
+                "function pts(g){" +
+                "if(g._nw)return g._nw;" +
+                "var raw=g.getAttribute('data-points')||'';var out=[];" +
+                "var toks=raw.split(' ');" +
+                "for(var i=0;i<toks.length;i++){var s=toks[i];if(!s)continue;" +
+                "var c=s.indexOf(',');if(c<0)continue;" +
+                "var t=parseFloat(s.substring(0,c));var v=parseFloat(s.substring(c+1));" +
+                "if(t===t&&v===v)out.push({t:t,v:v});}" +  // t===t filters NaN
+                "out.sort(function(a,b){return a.t-b.t;});" +
+                "g._nw=out;return out;}" +
+
+                // Nearest sample (by |t-cursorT|) in a sorted point array, or null.
+                "function nearest(a,t){if(!a.length)return null;" +
+                "var lo=0,hi=a.length-1;" +
+                "while(lo<hi){var m=(lo+hi)>>1;if(a[m].t<t)lo=m+1;else hi=m;}" +
+                "var best=a[lo];var bd=Math.abs(best.t-t);" +
+                "if(lo>0){var d=Math.abs(a[lo-1].t-t);if(d<bd){best=a[lo-1];bd=d;}}" +
+                "return best;}" +
+
+                // Format a value with ~2-3 significant digits + the chart unit.
+                "function fmtVal(v,unit){var a=Math.abs(v),s;" +
+                "if(a>=1000)s=v.toFixed(0);" +
+                "else if(a>=100)s=v.toFixed(0);" +
+                "else if(a>=10)s=v.toFixed(1);" +
+                "else s=v.toFixed(2);" +
+                "return unit?(s+' '+unit):s;}" +
+
+                // HH:mm:ss from epoch-ms using UTC getters (the encoded wall-clock).
+                "function fmtTime(ms){var d=new Date(ms);" +
+                "function p(n){return(n<10?'0':'')+n;}" +
+                "return p(d.getUTCHours())+':'+p(d.getUTCMinutes())+':'+p(d.getUTCSeconds());}" +
+
+                // Wire one svg.nw-chart: crosshair + dots + tooltip on hover.
+                "function wireChart(svg){" +
+                "if(svg._nwWired)return;svg._nwWired=1;" +
+                "var L=parseFloat(svg.getAttribute('data-l'));" +
+                "var T=parseFloat(svg.getAttribute('data-t'));" +
+                "var W=parseFloat(svg.getAttribute('data-w'));" +
+                "var H=parseFloat(svg.getAttribute('data-h'));" +
+                "var XF=parseFloat(svg.getAttribute('data-xfrom'));" +
+                "var XT=parseFloat(svg.getAttribute('data-xto'));" +
+                "var YMIN=parseFloat(svg.getAttribute('data-ymin'));" +
+                "var YMAX=parseFloat(svg.getAttribute('data-ymax'));" +
+                "var unit=svg.getAttribute('data-unit')||'';" +
+                "if(!(W>0)||!(H>0)||!(XT>XF)||!(YMAX>YMIN))return;" +
+                // Map data -> svg user units exactly as the chart was drawn.
+                "function xOf(t){return L+(t-XF)/(XT-XF)*W;}" +
+                "function yOf(v){return T+(1-(v-YMIN)/(YMAX-YMIN))*H;}" +
+                // Overlay group (crosshair line + dots) appended last so it sits on top.
+                "var ov=document.createElementNS(SVGNS,'g');ov.setAttribute('pointer-events','none');" +
+                "svg.appendChild(ov);" +
+                "var cross=document.createElementNS(SVGNS,'line');cross.setAttribute('class','nw-cross');" +
+                "cross.setAttribute('y1',T);cross.setAttribute('y2',T+H);" +
+                "var dots=[];" +
+                "function clear(){ov.style.display='none';tip.classList.remove('nw-show');}" +
+                "function ensureDots(n){while(dots.length<n){" +
+                "var d=document.createElementNS(SVGNS,'circle');d.setAttribute('class','nw-dot');" +
+                "d.setAttribute('r','3.4');d.setAttribute('stroke','#0b0e14');d.setAttribute('stroke-width','1.5');" +
+                "ov.appendChild(d);dots.push(d);}}" +
+                "function move(ev){" +
+                "var ctm=svg.getScreenCTM();if(!ctm)return;" +
+                "var pt=svg.createSVGPoint();pt.x=ev.clientX;pt.y=ev.clientY;" +
+                "var lp=pt.matrixTransform(ctm.inverse());" +
+                // Clamp the crosshair to the plot area; derive cursor time from it.
+                "var px=lp.x;if(px<L)px=L;else if(px>L+W)px=L+W;" +
+                "var ct=XF+(px-L)/W*(XT-XF);" +
+                // Crosshair line.
+                "if(!cross.parentNode)ov.appendChild(cross);" +
+                "cross.setAttribute('x1',px);cross.setAttribute('x2',px);" +
+                // Build tooltip rows + hover dots for every VISIBLE series.
+                "var ser=svg.querySelectorAll('g.nw-series');" +
+                "var rows='';var di=0;ensureDots(ser.length);" +
+                "for(var i=0;i<ser.length;i++){var g=ser[i];" +
+                "if(g.style.display==='none'){continue;}" +
+                "var col=g.getAttribute('data-color')||'#38bdf8';" +
+                "var lab=g.getAttribute('data-label')||'';" +
+                "var np=nearest(pts(g),ct);" +
+                "var vtxt='—';" +
+                "if(np){vtxt=fmtVal(np.v,unit);" +
+                "var d=dots[di++];d.style.display='';d.setAttribute('fill',col);" +
+                "d.setAttribute('cx',xOf(np.t));d.setAttribute('cy',yOf(np.v));}" +
+                "rows+='<div class=\\\"nw-tip-row\\\"><span class=\\\"nw-sw\\\" style=\\\"background:'+col+'\\\"></span>'+" +
+                "'<span class=\\\"nw-lab\\\">'+esc(lab)+'</span><span class=\\\"nw-val\\\">'+esc(vtxt)+'</span></div>';}" +
+                // Hide any leftover dots beyond the visible-series count.
+                "for(var k=di;k<dots.length;k++){dots[k].style.display='none';}" +
+                "ov.style.display='';" +
+                "tip.innerHTML='<div class=\\\"nw-tip-time\\\">'+esc(fmtTime(ct))+'</div>'+rows;" +
+                "tip.style.left=ev.clientX+'px';tip.style.top=(ev.clientY-14)+'px';" +
+                "tip.classList.add('nw-show');" +
+                "}" +
+                "svg.addEventListener('mousemove',move);" +
+                "svg.addEventListener('mouseleave',clear);" +
+                "clear();" +
+                "}" +
+
+                // Small HTML-escape for tooltip text built via innerHTML.
+                "function esc(s){s=''+s;return s.replace(/&/g,'&amp;').replace(/</g,'&lt;')" +
+                ".replace(/>/g,'&gt;').replace(/\"/g,'&quot;');}" +
+
+                // Wire every chart on the page.
+                "var charts=document.querySelectorAll('svg.nw-chart');" +
+                "for(var i=0;i<charts.length;i++){wireChart(charts[i]);}" +
+
+                // ---------- legend: per-card toggle (click) + emphasis (hover) ----------
+                "var legs=document.querySelectorAll('[data-nw-toggle]');" +
+                "function cardOf(el){var n=el;while(n&&n!==document.body){" +
+                "if(n.classList&&n.classList.contains('metric'))return n;n=n.parentNode;}return document;}" +
+                "function seriesIn(card,label){" +
+                "var all=card.querySelectorAll('g.nw-series');var r=[];" +
+                "for(var i=0;i<all.length;i++){if(all[i].getAttribute('data-label')===label)r.push(all[i]);}" +
+                "return r;}" +
+                "for(var i=0;i<legs.length;i++){(function(li){" +
+                "var label=li.getAttribute('data-nw-toggle');var card=cardOf(li);" +
+                // Click toggles this series' visibility across every chart in this card.
+                "function toggle(){var off=li.classList.toggle('nw-off');" +
+                "var gs=seriesIn(card,label);" +
+                "for(var j=0;j<gs.length;j++){gs[j].style.display=off?'none':'';}}" +
+                "li.addEventListener('click',toggle);" +
+                "li.addEventListener('keydown',function(e){if(e.key==='Enter'||e.key===' '){e.preventDefault();toggle();}});" +
+                // Hover emphasises this series and fades the others within the card.
+                "li.addEventListener('mouseenter',function(){" +
+                "var svgs=card.querySelectorAll('svg.nw-chart');" +
+                "for(var s=0;s<svgs.length;s++){svgs[s].classList.add('nw-emph');}" +
+                "var gs=seriesIn(card,label);for(var j=0;j<gs.length;j++){gs[j].classList.add('nw-hot');}});" +
+                "li.addEventListener('mouseleave',function(){" +
+                "var svgs=card.querySelectorAll('svg.nw-chart');" +
+                "for(var s=0;s<svgs.length;s++){svgs[s].classList.remove('nw-emph');}" +
+                "var gs=card.querySelectorAll('g.nw-series.nw-hot');" +
+                "for(var j=0;j<gs.length;j++){gs[j].classList.remove('nw-hot');}});" +
+                "})(legs[i]);}" +
+
                 "})();";
         }
 
@@ -865,9 +1016,12 @@ namespace NetWatch.Report
             c.Append(".sep{margin:0 7px;color:#3a4555}");
 
             // ---- metric grid ----
-            c.Append(".grid{display:grid;gap:18px;padding:18px 22px 8px;" +
-                "grid-template-columns:repeat(auto-fit,minmax(420px,1fr))}");
-            c.Append("@media (max-width:900px){.grid{grid-template-columns:1fr}}");
+            // Default 2 columns on a normal desktop; collapse to 1 when narrow; allow
+            // at most 3 on a very wide screen. Charts stay fluid (width:100%).
+            c.Append(".grid{display:grid;gap:20px;padding:18px 22px 8px;" +
+                "grid-template-columns:repeat(2,minmax(0,1fr))}");
+            c.Append("@media (max-width:1024px){.grid{grid-template-columns:1fr}}");
+            c.Append("@media (min-width:1700px){.grid{grid-template-columns:repeat(3,minmax(0,1fr))}}");
             c.Append(".card{background:" + PanelColor + ";border:1px solid " + PanelBorder + ";" +
                 "border-radius:14px;padding:16px 18px;box-shadow:0 1px 3px rgba(0,0,0,.4)}");
             c.Append(".card-head h2{margin:0;font-size:16px;font-weight:650;color:" + HeadingColor + "}");
@@ -876,19 +1030,49 @@ namespace NetWatch.Report
                 "margin-left:6px;vertical-align:middle}");
             c.Append(".card-head .desc{margin:5px 0 0;color:" + MutedColor + ";font-size:12.5px}");
 
-            // legend
+            // legend — entries are clickable (toggle) + hoverable (emphasise)
             c.Append(".legend{display:flex;flex-wrap:wrap;gap:6px 14px;margin:12px 0 4px}");
-            c.Append(".legend .li{display:flex;align-items:center;gap:6px;font-size:12px;color:" + MutedColor + "}");
-            c.Append(".legend .li i{width:10px;height:10px;border-radius:3px;display:inline-block}");
+            c.Append(".legend .li{display:flex;align-items:center;gap:6px;font-size:12px;color:" + MutedColor + ";" +
+                "cursor:pointer;user-select:none;padding:2px 6px;border-radius:6px;" +
+                "transition:background .12s,opacity .12s}");
+            c.Append(".legend .li:hover{background:rgba(255,255,255,.05);color:" + TextColor + "}");
+            c.Append(".legend .li:focus-visible{outline:2px solid " + AccentCyan + ";outline-offset:1px}");
+            c.Append(".legend .li i{width:10px;height:10px;border-radius:3px;display:inline-block;flex:0 0 auto}");
+            // Hidden (toggled-off) series: dim the legend entry and strike its label.
+            c.Append(".legend .li.nw-off{opacity:.4;text-decoration:line-through}");
 
-            // chart well — chart scales to card width
+            // chart well — chart scales to card width; taller well for the bigger viewBox
             c.Append(".chart-stack{margin-top:6px}");
             c.Append(".chart{background:" + PanelColor2 + ";border:1px solid " + PanelBorder + ";" +
-                "border-radius:10px;padding:8px}");
-            c.Append(".svgwrap{width:100%;overflow:hidden}");
+                "border-radius:10px;padding:10px}");
+            c.Append(".svgwrap{position:relative;width:100%;overflow:hidden}");
             c.Append(".svgwrap svg{width:100%;height:auto;display:block}");
-            c.Append(".nodata{display:flex;align-items:center;justify-content:center;height:150px;" +
+            c.Append(".nodata{display:flex;align-items:center;justify-content:center;height:200px;" +
                 "color:" + MutedColor + ";font-size:13px}");
+
+            // ---- chart interactivity (crosshair, hover dots, tooltip, emphasis) ----
+            // Crosshair: thin muted dashed vertical line at the cursor's plot x.
+            c.Append(".nw-cross{stroke:" + MutedColor + ";stroke-width:1;stroke-dasharray:3 3;" +
+                "opacity:.55;pointer-events:none}");
+            // Hover dot: a filled circle in the series colour at the nearest sample.
+            c.Append(".nw-dot{pointer-events:none}");
+            // Series emphasis: when hovering a legend entry, fade the other series.
+            c.Append(".nw-chart.nw-emph .nw-series{opacity:.18;transition:opacity .12s}");
+            c.Append(".nw-chart.nw-emph .nw-series.nw-hot{opacity:1}");
+            // Floating tooltip panel (created once by the JS, reused, follows the cursor).
+            c.Append(".nw-tip{position:fixed;z-index:9999;pointer-events:none;min-width:120px;" +
+                "background:rgba(13,18,26,.96);border:1px solid " + PanelBorder + ";border-radius:9px;" +
+                "padding:8px 10px;font-size:12px;color:" + TextColor + ";line-height:1.45;" +
+                "box-shadow:0 8px 24px rgba(0,0,0,.55);opacity:0;transition:opacity .08s;" +
+                "transform:translate(-50%,-100%)}");
+            c.Append(".nw-tip.nw-show{opacity:1}");
+            c.Append(".nw-tip .nw-tip-time{font-weight:700;margin-bottom:5px;color:" + TextColor + ";" +
+                "font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}");
+            c.Append(".nw-tip .nw-tip-row{display:flex;align-items:center;gap:7px;white-space:nowrap}");
+            c.Append(".nw-tip .nw-tip-row .nw-sw{width:9px;height:9px;border-radius:2px;flex:0 0 auto}");
+            c.Append(".nw-tip .nw-tip-row .nw-lab{color:" + MutedColor + "}");
+            c.Append(".nw-tip .nw-tip-row .nw-val{margin-left:auto;font-weight:600;" +
+                "font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}");
 
             // footer stats
             c.Append(".foot-stack{margin-top:10px}");

@@ -84,12 +84,30 @@ namespace NetWatch.Report
 
             var sb = new StringBuilder(4096);
 
+            // Epoch-millisecond X domain for the interactivity contract: encode the
+            // LOCAL wall-clock directly (no timezone offset) so the report JS can map
+            // a cursor time back to the same X positions used to draw the lines.
+            double xFromMs = EpochMs(from);
+            double xToMs = EpochMs(to);
+
+            // Y unit string (also published to the root via data-unit for the tooltip).
+            string unit = string.IsNullOrEmpty(spec.YUnit) ? "" : spec.YUnit;
+
             // Responsive root: viewBox + width:100%, no fixed pixel width attribute,
-            // preserveAspectRatio so it scales cleanly inside its card.
-            sb.Append("<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 ")
+            // preserveAspectRatio so it scales cleanly inside its card. The class +
+            // data-* attributes describe the PLOT RECTANGLE (viewBox user units) and
+            // the data scales actually used below, so the report's inline JS can attach
+            // a crosshair / tooltip / hover-dots and legend toggling without any
+            // external library. See the contract in the surrounding feature notes.
+            sb.Append("<svg xmlns=\"http://www.w3.org/2000/svg\" class=\"nw-chart\" viewBox=\"0 0 ")
               .Append(I(width)).Append(' ').Append(I(height))
               .Append("\" width=\"100%\" preserveAspectRatio=\"xMidYMid meet\" role=\"img\"")
               .Append(" style=\"display:block;width:100%;height:auto\"")
+              .Append(" data-l=\"").Append(N(left)).Append("\" data-t=\"").Append(N(top))
+              .Append("\" data-w=\"").Append(N(plotW)).Append("\" data-h=\"").Append(N(plotH))
+              .Append("\" data-xfrom=\"").Append(Ms(xFromMs)).Append("\" data-xto=\"").Append(Ms(xToMs))
+              .Append("\" data-ymin=\"").Append(Num(yMin)).Append("\" data-ymax=\"").Append(Num(yMax))
+              .Append("\" data-unit=\"").Append(Esc(unit)).Append('"')
               .Append(" font-family=\"-apple-system,&#39;Segoe UI&#39;,Roboto,Helvetica,Arial,sans-serif\">");
 
             // ---- defs: one soft gradient + one clip per series ----
@@ -116,7 +134,6 @@ namespace NetWatch.Report
 
             // ---- Y gridlines + value labels (thin, muted; no heavy frame) ----
             int ySteps = 4;
-            string unit = string.IsNullOrEmpty(spec.YUnit) ? "" : spec.YUnit;
             for (int i = 0; i <= ySteps; i++)
             {
                 double frac = (double)i / ySteps;
@@ -170,35 +187,52 @@ namespace NetWatch.Report
             foreach (var s in series)
             {
                 if (s == null) { continue; }
-                if (s.Points == null || s.Points.Count == 0) { gi++; continue; }
 
                 string color = SeriesColor(s);
                 string fillId = "url(#g" + uid + "_" + I(gi) + ")";
 
-                // Accumulate contiguous (non-missing) runs as point lists, then
-                // emit an area path and a stroke path per run. The clip keeps the
-                // soft fill inside the plot box even after the round-cap stroke.
-                var run = new List<double[]>();
-                foreach (var p in s.Points)
+                // Build the present-sample list ("epochMs,value" space-separated,
+                // invariant culture, '.' decimal) the contract publishes on the
+                // group so the report JS can drive crosshair/tooltip/hover-dots.
+                // Missing / NaN / Infinity samples are simply omitted.
+                string dataPoints = BuildPointsAttr(s, from);
+
+                // Wrap EVERY visual element of this series (its gradient area path(s),
+                // its stroke line path(s) and any dot circle(s)) in one group so a
+                // single style.display toggle hides/shows the whole series. The group
+                // is emitted even for an empty series so the legend can map to it.
+                sb.Append("<g class=\"nw-series\" data-label=\"").Append(Esc(s.Label ?? ""))
+                  .Append("\" data-color=\"").Append(Esc(color))
+                  .Append("\" data-points=\"").Append(dataPoints).Append("\">");
+
+                if (s.Points != null && s.Points.Count > 0)
                 {
-                    if (p.Missing || double.IsNaN(p.Value) || double.IsInfinity(p.Value))
+                    // Accumulate contiguous (non-missing) runs as point lists, then
+                    // emit an area path and a stroke path per run. The clip keeps the
+                    // soft fill inside the plot box even after the round-cap stroke.
+                    var run = new List<double[]>();
+                    foreach (var p in s.Points)
                     {
-                        FlushRun(sb, run, color, fillId, top, bottom, uid);
-                        continue;
+                        if (p.Missing || double.IsNaN(p.Value) || double.IsInfinity(p.Value))
+                        {
+                            FlushRun(sb, run, color, fillId, top, bottom, uid);
+                            continue;
+                        }
+
+                        double xf = (p.Time - from).Ticks / spanTicks;
+                        if (xf < 0) xf = 0; else if (xf > 1) xf = 1;
+                        double x = left + xf * plotW;
+
+                        double vf = (p.Value - yMin) / yRange;
+                        if (vf < 0) vf = 0; else if (vf > 1) vf = 1;
+                        double y = top + (1 - vf) * plotH;
+
+                        run.Add(new[] { x, y });
                     }
-
-                    double xf = (p.Time - from).Ticks / spanTicks;
-                    if (xf < 0) xf = 0; else if (xf > 1) xf = 1;
-                    double x = left + xf * plotW;
-
-                    double vf = (p.Value - yMin) / yRange;
-                    if (vf < 0) vf = 0; else if (vf > 1) vf = 1;
-                    double y = top + (1 - vf) * plotH;
-
-                    run.Add(new[] { x, y });
+                    FlushRun(sb, run, color, fillId, top, bottom, uid);
                 }
-                FlushRun(sb, run, color, fillId, top, bottom, uid);
 
+                sb.Append("</g>");
                 gi++;
             }
 
@@ -213,12 +247,18 @@ namespace NetWatch.Report
                     string color = SeriesColor(s);
                     string label = s.Label ?? "";
 
+                    // Wrap each legend entry so the report JS can click-toggle the
+                    // matching nw-series (by data-label) and hover-emphasise it.
+                    sb.Append("<g class=\"nw-legend-item\" data-label=\"").Append(Esc(label))
+                      .Append("\" data-color=\"").Append(Esc(color))
+                      .Append("\" style=\"cursor:pointer\">");
                     sb.Append("<rect x=\"").Append(N(lx)).Append("\" y=\"").Append(N(ly - 8))
                       .Append("\" width=\"10\" height=\"10\" rx=\"2\" fill=\"")
                       .Append(color).Append("\"/>");
                     sb.Append("<text x=\"").Append(N(lx + 14)).Append("\" y=\"").Append(N(ly))
                       .Append("\" fill=\"").Append(TextColor).Append("\" font-size=\"10\">")
                       .Append(Esc(label)).Append("</text>");
+                    sb.Append("</g>");
 
                     lx += 18 + label.Length * 6.2 + 14;
                 }
@@ -373,6 +413,51 @@ namespace NetWatch.Report
         private static string I(int v)
         {
             return v.ToString(Inv);
+        }
+
+        // Epoch milliseconds for the interactivity contract. The LOCAL DateTime is
+        // treated as the wall-clock to display: subtract the Unspecified-kind Unix
+        // epoch so NO timezone offset is applied. The report JS formats this back
+        // with getUTC* on new Date(ms), reproducing the same clock for any viewer.
+        private static readonly DateTime UnixEpoch =
+            new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Unspecified);
+
+        private static double EpochMs(DateTime dt)
+        {
+            return (dt - UnixEpoch).TotalMilliseconds;
+        }
+
+        // Integer-ms attribute value (no decimals, invariant), used for data-xfrom/xto.
+        private static string Ms(double ms)
+        {
+            if (double.IsNaN(ms) || double.IsInfinity(ms)) return "0";
+            return Math.Round(ms).ToString("0", Inv);
+        }
+
+        // Plain numeric attribute value (invariant, '.' decimal) for data-ymin/ymax
+        // and for each sample's value inside data-points.
+        private static string Num(double v)
+        {
+            if (double.IsNaN(v) || double.IsInfinity(v)) return "0";
+            return v.ToString("R", Inv);
+        }
+
+        // Compose the space-separated "epochMs,value" list of PRESENT samples for a
+        // series (missing / NaN / Infinity omitted). Invariant culture, '.' decimal.
+        // No XML-unsafe characters are produced (digits, '.', ',', '-', ' ' only).
+        private static string BuildPointsAttr(ChartSeries s, DateTime from)
+        {
+            if (s == null || s.Points == null || s.Points.Count == 0) return "";
+            var pb = new StringBuilder(s.Points.Count * 16);
+            bool first = true;
+            foreach (var p in s.Points)
+            {
+                if (p.Missing || double.IsNaN(p.Value) || double.IsInfinity(p.Value)) continue;
+                if (!first) pb.Append(' ');
+                pb.Append(Ms(EpochMs(p.Time))).Append(',').Append(Num(p.Value));
+                first = false;
+            }
+            return pb.ToString();
         }
 
         // Round coordinates to keep the markup small and finite.
