@@ -7,34 +7,50 @@ namespace NetWatch.Report
 {
     /// <summary>
     /// Renders a <see cref="ChartSpec"/> as a single, self-contained inline SVG
-    /// line chart: dark panel, Y-axis value gridlines with labels and unit, an
-    /// X-axis with "HH:mm" (or "HH:mm:ss" for short spans) time labels, one
-    /// polyline per series broken at gaps, and a legend for multi-series charts.
-    /// Pure and side-effect free: no JavaScript, no external CSS or font refs.
+    /// area/line chart for the premium dark dashboard: responsive (viewBox + 100%
+    /// width, no fixed pixel width), a soft transparent gradient area fill under
+    /// each series with a crisp stroke on top, thin muted gridlines (no heavy
+    /// frame), right-padded Y value labels (unit on the top tick) and "HH:mm"
+    /// (or "HH:mm:ss" for short spans) X time labels, one path per series broken
+    /// at gaps, and a legend for multi-series charts. Pure and side-effect free:
+    /// no JavaScript, no external CSS or font refs. Never throws; returns "" for
+    /// a null spec or one with no usable plotting area.
     /// </summary>
     public static class SvgChart
     {
         private static readonly CultureInfo Inv = CultureInfo.InvariantCulture;
 
-        // Panel palette (kept inline so the SVG opens identically offline).
-        private const string PanelBg = "#0f172a";   // slate-900
-        private const string GridColor = "#1e293b"; // slate-800
-        private const string AxisColor = "#334155"; // slate-700
-        private const string TextColor = "#cbd5e1"; // slate-300
-        private const string MutedColor = "#64748b";// slate-500
-        private const string TitleColor = "#f1f5f9";// slate-100
+        // Dashboard palette (kept inline so the SVG opens identically offline).
+        private const string GridColor = "#1f2733";  // subtle gridlines
+        private const string TextColor = "#cbd5e1";   // legend / labels
+        private const string MutedColor = "#94a3b8";  // axis ticks
+        private const string TitleColor = "#e5e7eb";  // bright text
+        private const string DefaultSeries = "#38bdf8"; // accent cyan fallback
 
         // Plot-area insets inside the overall Width/Height.
-        private const int PadLeft = 56;
-        private const int PadRight = 16;
-        private const int PadTop = 34;
-        private const int PadBottom = 30;
+        private const int PadLeft = 48;
+        private const int PadRight = 14;
+        private const int PadTop = 16;
+        private const int PadBottom = 26;
 
         /// <summary>
         /// Build the inline SVG markup for the chart. Returns "" for a null spec
         /// or one with no usable plotting area; never throws.
         /// </summary>
         public static string Render(ChartSpec spec)
+        {
+            try
+            {
+                return RenderCore(spec);
+            }
+            catch
+            {
+                // Never throw: a malformed spec yields an empty string, not a crash.
+                return "";
+            }
+        }
+
+        private static string RenderCore(ChartSpec spec)
         {
             if (spec == null) return "";
 
@@ -62,26 +78,43 @@ namespace NetWatch.Report
             var right = left + plotW;
             var bottom = top + plotH;
 
-            var sb = new StringBuilder(2048);
-            sb.Append("<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"")
-              .Append(I(width)).Append("\" height=\"").Append(I(height))
-              .Append("\" viewBox=\"0 0 ").Append(I(width)).Append(' ').Append(I(height))
-              .Append("\" role=\"img\" font-family=\"Segoe UI, Arial, sans-serif\">");
+            // Per-render salt keeps gradient/clip ids unique across the several
+            // SVGs embedded in one HTML page (ids are document-global in the DOM).
+            string uid = MakeUid(spec, width, height);
 
-            // Panel background.
-            sb.Append("<rect x=\"0\" y=\"0\" width=\"").Append(I(width))
-              .Append("\" height=\"").Append(I(height))
-              .Append("\" rx=\"6\" fill=\"").Append(PanelBg).Append("\"/>");
+            var sb = new StringBuilder(4096);
 
-            // Title.
-            if (!string.IsNullOrEmpty(spec.Title))
+            // Responsive root: viewBox + width:100%, no fixed pixel width attribute,
+            // preserveAspectRatio so it scales cleanly inside its card.
+            sb.Append("<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 ")
+              .Append(I(width)).Append(' ').Append(I(height))
+              .Append("\" width=\"100%\" preserveAspectRatio=\"xMidYMid meet\" role=\"img\"")
+              .Append(" style=\"display:block;width:100%;height:auto\"")
+              .Append(" font-family=\"-apple-system,&#39;Segoe UI&#39;,Roboto,Helvetica,Arial,sans-serif\">");
+
+            // ---- defs: one soft gradient + one clip per series ----
+            sb.Append("<defs>");
+            sb.Append("<clipPath id=\"clip").Append(uid).Append("\">")
+              .Append("<rect x=\"").Append(N(left)).Append("\" y=\"").Append(N(top))
+              .Append("\" width=\"").Append(N(plotW)).Append("\" height=\"").Append(N(plotH))
+              .Append("\"/></clipPath>");
+
+            int gi = 0;
+            foreach (var s in series)
             {
-                sb.Append("<text x=\"").Append(N(left)).Append("\" y=\"20\" fill=\"")
-                  .Append(TitleColor).Append("\" font-size=\"13\" font-weight=\"600\">")
-                  .Append(Esc(spec.Title)).Append("</text>");
+                if (s == null) continue;
+                string color = SeriesColor(s);
+                // Vertical gradient from the series colour (soft) to transparent.
+                sb.Append("<linearGradient id=\"g").Append(uid).Append('_').Append(I(gi))
+                  .Append("\" x1=\"0\" y1=\"0\" x2=\"0\" y2=\"1\">")
+                  .Append("<stop offset=\"0\" stop-color=\"").Append(color).Append("\" stop-opacity=\"0.28\"/>")
+                  .Append("<stop offset=\"1\" stop-color=\"").Append(color).Append("\" stop-opacity=\"0\"/>")
+                  .Append("</linearGradient>");
+                gi++;
             }
+            sb.Append("</defs>");
 
-            // ---- Y gridlines + value labels ----
+            // ---- Y gridlines + value labels (thin, muted; no heavy frame) ----
             int ySteps = 4;
             string unit = string.IsNullOrEmpty(spec.YUnit) ? "" : spec.YUnit;
             for (int i = 0; i <= ySteps; i++)
@@ -92,17 +125,18 @@ namespace NetWatch.Report
 
                 sb.Append("<line x1=\"").Append(N(left)).Append("\" y1=\"").Append(N(y))
                   .Append("\" x2=\"").Append(N(right)).Append("\" y2=\"").Append(N(y))
-                  .Append("\" stroke=\"").Append(GridColor).Append("\" stroke-width=\"1\"/>");
+                  .Append("\" stroke=\"").Append(GridColor)
+                  .Append("\" stroke-width=\"1\" shape-rendering=\"crispEdges\"/>");
 
                 string label = FormatValue(val);
                 if (i == 0 && unit.Length > 0) label += " " + unit;
-                sb.Append("<text x=\"").Append(N(left - 6)).Append("\" y=\"").Append(N(y + 3))
+                sb.Append("<text x=\"").Append(N(left - 8)).Append("\" y=\"").Append(N(y + 3))
                   .Append("\" fill=\"").Append(MutedColor)
                   .Append("\" font-size=\"10\" text-anchor=\"end\">")
                   .Append(Esc(label)).Append("</text>");
             }
 
-            // ---- X axis time labels + verticals ----
+            // ---- X axis time labels + faint verticals ----
             bool shortSpan = (to - from) < TimeSpan.FromMinutes(15);
             string timeFmt = shortSpan ? "HH:mm:ss" : "HH:mm";
             int xSteps = 5;
@@ -112,41 +146,44 @@ namespace NetWatch.Report
                 double x = left + frac * plotW;
                 DateTime t = from.AddTicks((long)(frac * spanTicks));
 
-                sb.Append("<line x1=\"").Append(N(x)).Append("\" y1=\"").Append(N(top))
-                  .Append("\" x2=\"").Append(N(x)).Append("\" y2=\"").Append(N(bottom))
-                  .Append("\" stroke=\"").Append(GridColor).Append("\" stroke-width=\"1\"/>");
+                // Skip the leftmost vertical so it doesn't double the Y baseline.
+                if (i > 0)
+                {
+                    sb.Append("<line x1=\"").Append(N(x)).Append("\" y1=\"").Append(N(top))
+                      .Append("\" x2=\"").Append(N(x)).Append("\" y2=\"").Append(N(bottom))
+                      .Append("\" stroke=\"").Append(GridColor)
+                      .Append("\" stroke-width=\"1\" shape-rendering=\"crispEdges\"/>");
+                }
 
                 string anchor = i == 0 ? "start" : (i == xSteps ? "end" : "middle");
-                sb.Append("<text x=\"").Append(N(x)).Append("\" y=\"").Append(N(bottom + 14))
+                sb.Append("<text x=\"").Append(N(x)).Append("\" y=\"").Append(N(bottom + 16))
                   .Append("\" fill=\"").Append(MutedColor)
                   .Append("\" font-size=\"10\" text-anchor=\"").Append(anchor).Append("\">")
                   .Append(Esc(t.ToString(timeFmt, Inv))).Append("</text>");
             }
 
-            // Axis frame (left + bottom).
-            sb.Append("<line x1=\"").Append(N(left)).Append("\" y1=\"").Append(N(top))
-              .Append("\" x2=\"").Append(N(left)).Append("\" y2=\"").Append(N(bottom))
-              .Append("\" stroke=\"").Append(AxisColor).Append("\" stroke-width=\"1\"/>");
-            sb.Append("<line x1=\"").Append(N(left)).Append("\" y1=\"").Append(N(bottom))
-              .Append("\" x2=\"").Append(N(right)).Append("\" y2=\"").Append(N(bottom))
-              .Append("\" stroke=\"").Append(AxisColor).Append("\" stroke-width=\"1\"/>");
-
-            // ---- Data polylines (broken at Missing points) ----
+            // ---- Data series: area fill (clipped) + crisp stroke, broken at gaps ----
             double yRange = yMax - yMin;
             if (yRange <= 0) yRange = 1; // guarded again so mapping is finite
 
+            gi = 0;
             foreach (var s in series)
             {
-                if (s == null || s.Points == null || s.Points.Count == 0) continue;
-                string color = string.IsNullOrEmpty(s.Color) ? "#4ade80" : s.Color;
+                if (s == null) { continue; }
+                if (s.Points == null || s.Points.Count == 0) { gi++; continue; }
 
-                var seg = new StringBuilder();
-                int segCount = 0;
+                string color = SeriesColor(s);
+                string fillId = "url(#g" + uid + "_" + I(gi) + ")";
+
+                // Accumulate contiguous (non-missing) runs as point lists, then
+                // emit an area path and a stroke path per run. The clip keeps the
+                // soft fill inside the plot box even after the round-cap stroke.
+                var run = new List<double[]>();
                 foreach (var p in s.Points)
                 {
                     if (p.Missing || double.IsNaN(p.Value) || double.IsInfinity(p.Value))
                     {
-                        FlushSegment(sb, seg, color, ref segCount);
+                        FlushRun(sb, run, color, fillId, top, bottom, uid);
                         continue;
                     }
 
@@ -158,21 +195,22 @@ namespace NetWatch.Report
                     if (vf < 0) vf = 0; else if (vf > 1) vf = 1;
                     double y = top + (1 - vf) * plotH;
 
-                    if (seg.Length > 0) seg.Append(' ');
-                    seg.Append(N(x)).Append(',').Append(N(y));
+                    run.Add(new[] { x, y });
                 }
-                FlushSegment(sb, seg, color, ref segCount);
+                FlushRun(sb, run, color, fillId, top, bottom, uid);
+
+                gi++;
             }
 
             // ---- Legend (only when more than one series) ----
             if (series.Count > 1)
             {
-                double lx = left + 4;
-                double ly = top + 12;
+                double lx = left + 2;
+                double ly = top + 2;
                 foreach (var s in series)
                 {
                     if (s == null) continue;
-                    string color = string.IsNullOrEmpty(s.Color) ? "#4ade80" : s.Color;
+                    string color = SeriesColor(s);
                     string label = s.Label ?? "";
 
                     sb.Append("<rect x=\"").Append(N(lx)).Append("\" y=\"").Append(N(ly - 8))
@@ -190,32 +228,54 @@ namespace NetWatch.Report
             return sb.ToString();
         }
 
-        // Emit one polyline for the points accumulated so far, then reset.
-        // A single point is drawn as a tiny dot so isolated samples stay visible.
-        private static void FlushSegment(StringBuilder sb, StringBuilder seg, string color, ref int segCount)
+        // Emit the soft area + crisp line for one contiguous run, then clear it.
+        // A single point is drawn as a small dot so isolated samples stay visible.
+        private static void FlushRun(StringBuilder sb, List<double[]> run, string color, string fillId,
+            double top, double bottom, string uid)
         {
-            if (seg.Length == 0) return;
-            string pts = seg.ToString();
-            seg.Length = 0;
-            segCount++;
+            if (run == null || run.Count == 0) return;
 
-            if (pts.IndexOf(' ') < 0)
+            if (run.Count == 1)
             {
-                // Exactly one coordinate pair -> draw a dot.
-                int comma = pts.IndexOf(',');
-                if (comma > 0)
-                {
-                    string cx = pts.Substring(0, comma);
-                    string cy = pts.Substring(comma + 1);
-                    sb.Append("<circle cx=\"").Append(cx).Append("\" cy=\"").Append(cy)
-                      .Append("\" r=\"1.5\" fill=\"").Append(color).Append("\"/>");
-                }
+                // Exactly one sample -> a dot (still inside the clip region).
+                double cx = run[0][0];
+                double cy = run[0][1];
+                sb.Append("<circle cx=\"").Append(N(cx)).Append("\" cy=\"").Append(N(cy))
+                  .Append("\" r=\"1.8\" fill=\"").Append(color).Append("\"/>");
+                run.Clear();
                 return;
             }
 
-            sb.Append("<polyline fill=\"none\" stroke=\"").Append(color)
-              .Append("\" stroke-width=\"1.5\" stroke-linejoin=\"round\" stroke-linecap=\"round\" points=\"")
-              .Append(pts).Append("\"/>");
+            // Baseline for the area fill is the plot bottom.
+            double baseY = bottom;
+
+            // Area path: down to baseline at the first x, across the line, back to
+            // baseline at the last x, closed. Clipped to the plot box.
+            var area = new StringBuilder(run.Count * 12 + 32);
+            area.Append('M').Append(N(run[0][0])).Append(' ').Append(N(baseY));
+            for (int i = 0; i < run.Count; i++)
+                area.Append('L').Append(N(run[i][0])).Append(' ').Append(N(run[i][1]));
+            area.Append('L').Append(N(run[run.Count - 1][0])).Append(' ').Append(N(baseY)).Append('Z');
+
+            sb.Append("<path d=\"").Append(area).Append("\" fill=\"").Append(fillId)
+              .Append("\" stroke=\"none\" clip-path=\"url(#clip").Append(uid).Append(")\"/>");
+
+            // Stroke line on top: round join/cap, crisp colour.
+            var line = new StringBuilder(run.Count * 12 + 8);
+            line.Append('M').Append(N(run[0][0])).Append(' ').Append(N(run[0][1]));
+            for (int i = 1; i < run.Count; i++)
+                line.Append('L').Append(N(run[i][0])).Append(' ').Append(N(run[i][1]));
+
+            sb.Append("<path d=\"").Append(line).Append("\" fill=\"none\" stroke=\"").Append(color)
+              .Append("\" stroke-width=\"1.75\" stroke-linejoin=\"round\" stroke-linecap=\"round\"/>");
+
+            run.Clear();
+        }
+
+        // Resolve a series' line colour with a sensible accent fallback.
+        private static string SeriesColor(ChartSeries s)
+        {
+            return (s == null || string.IsNullOrEmpty(s.Color)) ? DefaultSeries : s.Color;
         }
 
         // Resolve the vertical range from fixed bounds or the data, with padding.
@@ -288,6 +348,26 @@ namespace NetWatch.Report
             if (a >= 100) return v.ToString("0", Inv);
             if (a >= 10) return v.ToString("0.#", Inv);
             return v.ToString("0.##", Inv);
+        }
+
+        // A short, stable, DOM-safe id salt derived from the spec so gradient and
+        // clip ids never collide between the multiple SVGs on one page.
+        private static string MakeUid(ChartSpec spec, int width, int height)
+        {
+            unchecked
+            {
+                int h = 17;
+                h = h * 31 + (spec.Title ?? "").GetHashCode();
+                h = h * 31 + (spec.YUnit ?? "").GetHashCode();
+                h = h * 31 + spec.FromTime.Ticks.GetHashCode();
+                h = h * 31 + spec.ToTime.Ticks.GetHashCode();
+                h = h * 31 + width;
+                h = h * 31 + height;
+                if (spec.Series != null) h = h * 31 + spec.Series.Count;
+                // Base-36, always positive, prefixed so it's a valid id start.
+                uint u = (uint)h;
+                return "n" + u.ToString("x", Inv);
+            }
         }
 
         private static string I(int v)
