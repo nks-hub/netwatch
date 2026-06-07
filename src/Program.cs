@@ -325,6 +325,20 @@ namespace NetWatch
                 Thread.Sleep(200);
             }
 
+            // One speed test so the snapshot is complete (status note goes to stderr so it
+            // does not pollute the rendered frame on stdout).
+            if (cfg.SpeedtestEnabled)
+            {
+                try
+                {
+                    Console.Error.WriteLine("measuring internet speed (~30s)...");
+                    var sr = SpeedTest.Run();
+                    agg.AddSpeed(sr);
+                    log.Speed(sr);
+                }
+                catch { }
+            }
+
             Console.Write(Dashboard.RenderToText(agg.Snapshot(), cfg, DateTime.UtcNow, 100));
             FlushEvents(agg, log);
             return 0;

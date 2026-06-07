@@ -128,7 +128,7 @@ namespace NetWatch
             outp.Add(new Line("", def));
 
             // Speedtest
-            BuildSpeed(outp, snap, cfg, def);
+            BuildSpeed(outp, snap, cfg, def, width);
 
             // Trace
             BuildTrace(outp, snap, def);
@@ -246,7 +246,7 @@ namespace NetWatch
             }
         }
 
-        private static void BuildSpeed(System.Collections.Generic.List<Line> outp, Snapshot snap, Config cfg, ConsoleColor def)
+        private static void BuildSpeed(System.Collections.Generic.List<Line> outp, Snapshot snap, Config cfg, ConsoleColor def, int width)
         {
             var sp = snap.LastSpeed;
             if (sp == null || sp.Time == default(DateTime))
@@ -259,20 +259,87 @@ namespace NetWatch
                 outp.Add(new Line("SPEEDTEST    error " + sp.Error + "  (" + Local(sp.Time) + ")", ConsoleColor.Red));
                 return;
             }
-            var sb = new StringBuilder();
-            sb.Append("SPEEDTEST    down ").Append(Num(sp.DownMbps)).Append(" / up ").Append(Num(sp.UpMbps)).Append(" Mbps");
-            sb.Append("  lat ").Append(Num(sp.LatencyMs)).Append(" +/- ").Append(Num(sp.JitterMs)).Append(" ms");
-            if (!string.IsNullOrEmpty(sp.Server)) sb.Append("  ").Append(sp.Server);
-            sb.Append("  (").Append(Local(sp.Time)).Append(')');
+            // Real result — horizontal bar gauges on a shared auto-scale.
+            const int Cells = 24;
 
+            double down = (!double.IsNaN(sp.DownMbps) && sp.DownMbps > 0) ? sp.DownMbps : 0;
+            double up = (!double.IsNaN(sp.UpMbps) && sp.UpMbps > 0) ? sp.UpMbps : 0;
+            double maxDown = (!double.IsNaN(snap.MaxDownMbps) && snap.MaxDownMbps > 0) ? snap.MaxDownMbps : 0;
+            double maxUp = (!double.IsNaN(snap.MaxUpMbps) && snap.MaxUpMbps > 0) ? snap.MaxUpMbps : 0;
+            double avgDown = double.IsNaN(snap.AvgDownMbps) ? 0 : snap.AvgDownMbps;
+            double avgUp = double.IsNaN(snap.AvgUpMbps) ? 0 : snap.AvgUpMbps;
+
+            double peak = Math.Max(Math.Max(down, up), Math.Max(maxDown, maxUp));
+            double scaleMax = NiceCeil(peak);
+
+            outp.Add(new Line("SPEEDTEST", ConsoleColor.White));
+            outp.Add(new Line(SpeedBar("↓ down", down, maxDown, scaleMax, Cells), ConsoleColor.Cyan));
+            outp.Add(new Line(SpeedBar("↑ up  ", up, maxUp, scaleMax, Cells), ConsoleColor.Green));
+
+            var axis = new StringBuilder();
+            axis.Append("  scale 0").Append('─', Cells - 4).Append(Num(scaleMax));
+            axis.Append("   avg ↓ ").Append(Num(avgDown)).Append(" / ↑ ").Append(Num(avgUp));
+            if (snap.SpeedCount > 0)
+                axis.Append(" · ").Append(snap.SpeedCount.ToString(CultureInfo.InvariantCulture))
+                    .Append(snap.SpeedCount == 1 ? " test" : " tests");
+            outp.Add(new Line(axis.ToString(), ConsoleColor.DarkGray));
+
+            double lat = double.IsNaN(sp.LatencyMs) ? 0 : sp.LatencyMs;
+            double jit = double.IsNaN(sp.JitterMs) ? 0 : sp.JitterMs;
+            ConsoleColor latColor = lat >= 100 ? ConsoleColor.Red : lat >= 40 ? ConsoleColor.Yellow : ConsoleColor.Gray;
+
+            var info = new StringBuilder();
+            info.Append("  lat ").Append(Num(lat)).Append(" ±").Append(Num(jit)).Append(" ms");
+            if (!string.IsNullOrEmpty(sp.Server)) info.Append(" · ").Append(sp.Server);
+            info.Append(" · ").Append(Local(sp.Time));
             if (cfg.SpeedtestEnabled && cfg.SpeedtestIntervalMin > 0)
             {
                 DateTime nextUtc = ToUtc(sp.Time).AddMinutes(cfg.SpeedtestIntervalMin);
                 TimeSpan rem = nextUtc - DateTime.UtcNow;
                 if (rem < TimeSpan.Zero) rem = TimeSpan.Zero;
-                sb.Append("  next in ").Append(((int)rem.TotalMinutes).ToString(CultureInfo.InvariantCulture)).Append('m');
+                info.Append(" · next in ").Append(((int)rem.TotalMinutes).ToString(CultureInfo.InvariantCulture)).Append('m');
             }
-            outp.Add(new Line(sb.ToString(), def));
+            outp.Add(new Line(info.ToString(), latColor));
+        }
+
+        // One gauge row: "  <label>  <bar>  <value> Mbps   max <peak>", with a '┊' tick
+        // marking the session-max position on the shared scale.
+        private static string SpeedBar(string label, double value, double sessionMax, double scaleMax, int cells)
+        {
+            if (scaleMax <= 0) scaleMax = 1;
+            if (value < 0) value = 0;
+            int filled = (int)Math.Round(value / scaleMax * cells);
+            if (filled < 0) filled = 0; else if (filled > cells) filled = cells;
+            int markPos = -1;
+            if (sessionMax > value)
+            {
+                markPos = (int)Math.Round(sessionMax / scaleMax * cells);
+                if (markPos > cells) markPos = cells;
+            }
+            var bar = new StringBuilder(cells);
+            for (int i = 0; i < cells; i++)
+            {
+                if (i < filled) bar.Append('█');
+                else if (i == markPos) bar.Append('┊');
+                else bar.Append('░');
+            }
+            var sb = new StringBuilder();
+            sb.Append("  ").Append(label).Append("  ").Append(bar);
+            sb.Append("  ").Append(Pad(Num(value), 7)).Append("Mbps");
+            if (sessionMax > 0) sb.Append("   max ").Append(Num(sessionMax));
+            return sb.ToString();
+        }
+
+        // Round a positive value up to a readable 1/2/5×10^n ceiling so the shared bar
+        // scale stays clean even though the real link capacity is unknown.
+        private static double NiceCeil(double v)
+        {
+            if (double.IsNaN(v) || double.IsInfinity(v) || v <= 0) return 1;
+            double exp = Math.Floor(Math.Log10(v));
+            double pow = Math.Pow(10, exp);
+            double frac = v / pow;
+            double nice = frac <= 1 ? 1 : frac <= 2 ? 2 : frac <= 5 ? 5 : 10;
+            return nice * pow;
         }
 
         private static void BuildTrace(System.Collections.Generic.List<Line> outp, Snapshot snap, ConsoleColor def)
