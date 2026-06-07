@@ -307,7 +307,6 @@ namespace NetWatch
             var targets = snap.Targets ?? new TargetSnapshot[0];
             string worst = null;
             double worstAvg = -1;
-            bool firstRow = true;
             foreach (var ts in targets)
             {
                 if (ts == null) continue;
@@ -335,8 +334,6 @@ namespace NetWatch
                 else if (lossPct > 0 || avgMs > cfg.HighLatencyMs) color = ConsoleColor.Yellow;
                 bool emphasize = ts.Kind == TargetKind.Gateway || ts.Kind == TargetKind.Vpn;
                 if (emphasize && color == ConsoleColor.Green) color = ConsoleColor.Cyan;
-                if (!firstRow) outp.Add(new Line(Card("", cw), ConsoleColor.DarkGray)); // blank spacer between rows
-                firstRow = false;
                 outp.Add(new Line(Card(sb.ToString(), cw), color));
 
                 if (avgMs > worstAvg) { worstAvg = avgMs; worst = label; }
@@ -581,23 +578,21 @@ namespace NetWatch
         private static string Spark(double[] data)
         {
             if (data == null || data.Length == 0) return "";
-            double min = double.PositiveInfinity, max = double.NegativeInfinity;
+            double max = 0;
             foreach (var d in data)
-            {
-                if (d < 0) continue; // lost probe marker
-                if (d < min) min = d;
                 if (d > max) max = d;
-            }
-            bool haveRange = !double.IsInfinity(min) && !double.IsInfinity(max);
-            double span = haveRange ? (max - min) : 0;
+
+            // Scale from ZERO (not the per-target min) with a small floor, so a stable
+            // low-latency target renders as low flat bars instead of full-height blocks
+            // that merge with the neighbouring rows into a solid wall. Real spikes still
+            // stand out tall; the lost-probe marker is '_'.
+            double scaleMax = max < 10.0 ? 10.0 : max;
 
             var sb = new StringBuilder(data.Length);
             foreach (var d in data)
             {
                 if (d < 0) { sb.Append('_'); continue; } // lost
-                int idx;
-                if (!haveRange || span <= 0) idx = 0;
-                else idx = (int)Math.Round((d - min) / span * (Blocks.Length - 1));
+                int idx = (int)Math.Round(d / scaleMax * (Blocks.Length - 1));
                 if (idx < 0) idx = 0; else if (idx >= Blocks.Length) idx = Blocks.Length - 1;
                 sb.Append(Blocks[idx]);
             }
