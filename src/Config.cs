@@ -34,6 +34,7 @@ namespace NetWatch
         public int InterfaceIntervalSec { get; set; }
         public int SummaryIntervalSec { get; set; }
         public int ConsoleRefreshMs { get; set; }
+        public int ReportIntervalMin { get; set; }
 
         public string LogDir { get; set; }
         public int[] WindowsSec { get; set; }
@@ -65,6 +66,7 @@ namespace NetWatch
                 InterfaceIntervalSec = 2,
                 SummaryIntervalSec = 60,
                 ConsoleRefreshMs = 1000,
+                ReportIntervalMin = 1,
                 LogDir = "logs",
                 WindowsSec = new[] { 60, 300, 900, 3600 },
                 SparkLen = 120,
@@ -136,6 +138,7 @@ namespace NetWatch
                 case "interface_interval_sec": InterfaceIntervalSec = ParseInt(val, InterfaceIntervalSec); break;
                 case "summary_interval_sec": SummaryIntervalSec = ParseInt(val, SummaryIntervalSec); break;
                 case "console_refresh_ms": ConsoleRefreshMs = ParseInt(val, ConsoleRefreshMs); break;
+                case "report_interval_min": ReportIntervalMin = ParseInt(val, ReportIntervalMin); break;
                 case "log_dir": LogDir = val; break;
                 case "windows_sec": WindowsSec = SplitIntList(val, WindowsSec); break;
                 case "spark_len": SparkLen = ParseInt(val, SparkLen); break;
@@ -188,6 +191,8 @@ namespace NetWatch
             sb.AppendLine("# --- Logging & display -------------------------------------------------");
             sb.AppendLine("summary_interval_sec = " + SummaryIntervalSec.ToString(CultureInfo.InvariantCulture));
             sb.AppendLine("console_refresh_ms = " + ConsoleRefreshMs.ToString(CultureInfo.InvariantCulture));
+            sb.AppendLine("# Minutes between automatic HTML report writes (report.html next to logs); 0 disables.");
+            sb.AppendLine("report_interval_min = " + ReportIntervalMin.ToString(CultureInfo.InvariantCulture));
             sb.AppendLine("log_dir = " + (LogDir ?? "logs"));
             sb.AppendLine("windows_sec = " + JoinIntList(WindowsSec));
             sb.AppendLine("spark_len = " + SparkLen.ToString(CultureInfo.InvariantCulture));

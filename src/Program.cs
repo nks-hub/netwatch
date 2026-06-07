@@ -45,6 +45,8 @@ namespace NetWatch
             bool once = false;
             bool noUi = false;
             bool frame = false;
+            bool report = false;
+            string reportPath = null; // optional explicit output path for -report
             int frameWidth = 100; // width for -frame rendering (optional arg overrides)
 
             for (int i = 0; i < args.Length; i++)
@@ -96,6 +98,15 @@ namespace NetWatch
                             i++;
                         }
                         break;
+                    case "-report":
+                    case "--report":
+                        report = true;
+                        // Optional output path argument: consume the next token only when it
+                        // is not another option (does not start with '-'); otherwise default
+                        // to report.html in the log directory later on.
+                        if (i + 1 < args.Length && !args[i + 1].StartsWith("-"))
+                            reportPath = args[++i];
+                        break;
                     case "-version":
                     case "--version":
                     case "-v":
@@ -131,6 +142,28 @@ namespace NetWatch
 
             // ---- resolve log directory ----
             string logDir = ResolveLogDir(exeDir, logDirOverride, cfg.LogDir);
+
+            // ---- one-shot HTML report (charts) then exit, no monitoring ----
+            if (report)
+            {
+                string outPath = reportPath ?? Path.Combine(logDir, "report.html");
+                try
+                {
+                    string written = NetWatch.Report.HtmlReport.Write(logDir, outPath, DateTime.Now);
+                    if (string.IsNullOrEmpty(written))
+                    {
+                        Console.Error.WriteLine("Failed to write HTML report to " + outPath);
+                        return 1;
+                    }
+                    Console.WriteLine(written);
+                    return 0;
+                }
+                catch (Exception ex)
+                {
+                    Console.Error.WriteLine("Failed to write HTML report: " + ex.Message);
+                    return 1;
+                }
+            }
 
             // ---- interface sample for startup target building ----
             // Take two samples ~1s apart so throughput deltas are populated; a single
@@ -362,6 +395,7 @@ namespace NetWatch
         private static int RunContinuous(Config cfg, Aggregator agg, LogWriter log,
             ThroughputState thState, List<Target> targets, bool noUi)
         {
+            string logDir = log.Dir;
             var cts = new CancellationTokenSource();
             var token = cts.Token;
             var targetsLock = new object();
@@ -411,6 +445,10 @@ namespace NetWatch
 
             // --- summary loop ---
             loops.Add(Task.Run(() => SummaryLoop(cfg, agg, log, token), token));
+
+            // --- HTML report loop (writes a fresh report.html next to the logs) ---
+            if (cfg.ReportIntervalMin > 0)
+                loops.Add(Task.Run(() => ReportLoop(cfg, log, logDir, token), token));
 
             // --- UI loop (foreground-ish; we just block Main on it) ---
             if (uiActive)
@@ -637,6 +675,18 @@ namespace NetWatch
                 if (Sleep(intervalMs, token)) return;
                 try { log.Summary(agg.Snapshot()); }
                 catch (Exception ex) { SafeEvent(log, "summary loop error: " + ex.Message); }
+            }
+        }
+
+        private static void ReportLoop(Config cfg, LogWriter log, string logDir, CancellationToken token)
+        {
+            int intervalMs = (cfg.ReportIntervalMin > 0 ? cfg.ReportIntervalMin : 1) * 60 * 1000;
+            string outPath = Path.Combine(logDir, "report.html");
+            while (!token.IsCancellationRequested)
+            {
+                try { NetWatch.Report.HtmlReport.Write(logDir, outPath, DateTime.Now); }
+                catch (Exception ex) { SafeEvent(log, "report loop error: " + ex.Message); }
+                if (Sleep(intervalMs, token)) return;
             }
         }
 
@@ -1008,6 +1058,8 @@ namespace NetWatch
             Console.WriteLine("  -frame [width]   Print one live dashboard frame to stdout and exit");
             Console.WriteLine("                   (optional render width, e.g. -frame 160; default 100)");
             Console.WriteLine("  -no-ui           Continuous monitoring without the live dashboard");
+            Console.WriteLine("  -report [path]   Write an HTML metrics report (charts) and exit");
+            Console.WriteLine("                   (default: report.html in the log directory)");
             Console.WriteLine("  -version         Print version and exit");
             Console.WriteLine("  -h, -help        Show this help and exit");
             Console.WriteLine();
