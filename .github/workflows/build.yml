@@ -58,7 +58,11 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@da05d552573ad5aba039eaac05058a918a7bf631 # v2.2.2
         with:
-          files: dist/netwatch.exe
+          name: NetWatch ${{ github.ref_name }}
+          generate_release_notes: true
+          files: |
+            dist/netwatch.exe
+            dist/netwatch.exe.config
           fail_on_unmatched_files: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
