@@ -1,0 +1,20 @@
+# Build output
+bin/
+obj/
+dist/
+
+# Runtime data
+logs/
+_*
+
+# Editor / IDE local configs
+.[a-z]*/
+!.git/
+!.github/
+!.gitignore
+/[A-Z]*.md
+!/README.md
+
+# Misc
+*.user
+*.suo
