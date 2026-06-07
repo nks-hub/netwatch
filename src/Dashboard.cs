@@ -114,113 +114,119 @@ namespace NetWatch
             outp.Add(new Line(" up " + upStr + "    " + now + "    log: " + (cfg.LogDir ?? "logs"), def));
             outp.Add(new Line("", def));
 
-            // Active link
-            BuildActiveLink(outp, snap.ActiveInterface, cfg, def);
-
-            // VPN
-            BuildVpn(outp, snap.Vpn, def);
-
+            // LINK card (active adapter + Wi-Fi + VPN, merged)
+            BuildLinkCard(outp, snap, cfg, width);
             outp.Add(new Line("", def));
 
-            // Targets table
-            BuildTargets(outp, snap, cfg, def, width);
-
+            // TARGETS card
+            BuildTargetsCard(outp, snap, cfg, width);
             outp.Add(new Line("", def));
 
-            // Speedtest
+            // SPEEDTEST card
             BuildSpeed(outp, snap, cfg, def, width);
-
-            // Trace
-            BuildTrace(outp, snap, def);
-
-            // Events
             outp.Add(new Line("", def));
-            outp.Add(new Line("EVENTS", ConsoleColor.White));
-            var ev = snap.RecentEvents ?? new string[0];
-            int start = Math.Max(0, ev.Length - 6);
-            for (int i = start; i < ev.Length; i++)
-                outp.Add(new Line("  " + ev[i], ConsoleColor.DarkGray));
+
+            // TRACE / EVENTS card
+            BuildTraceEventsCard(outp, snap, width);
 
             return outp;
         }
 
-        private static void BuildActiveLink(System.Collections.Generic.List<Line> outp, InterfaceSample a, Config cfg, ConsoleColor def)
+        // LINK card — active adapter (+ Wi-Fi signal + throughput) and VPN status, merged.
+        private static void BuildLinkCard(System.Collections.Generic.List<Line> outp, Snapshot snap, Config cfg, int width)
         {
+            int inner = Math.Max(0, Math.Min(66, width - 2));
+            int cw = Math.Max(0, inner - 2);
+            var a = snap.ActiveInterface;
+            var v = snap.Vpn;
+            string kindWord = a != null ? Display.KindWord(a.Kind) : "—";
+
+            outp.Add(new Line(TitledBorder('╭', '╮', " LINK ", inner), ConsoleColor.DarkCyan));
+
             if (a == null)
             {
-                outp.Add(new Line("ACTIVE LINK  (none / detecting...)", ConsoleColor.Yellow));
-                return;
+                outp.Add(new Line(Card("(no active link / detecting…)", cw), ConsoleColor.Yellow));
             }
-
-            var sb = new StringBuilder();
-            string kindWord = Display.KindWord(a.Kind);
-            string aname = a.Name ?? "";
-            sb.Append("ACTIVE LINK  ").Append(kindWord);
-            if (aname.Length > 0 && aname.IndexOf(kindWord, StringComparison.OrdinalIgnoreCase) < 0)
-                sb.Append("  ").Append(aname);
-            if (!string.IsNullOrEmpty(a.IpAddress)) sb.Append("  ip ").Append(a.IpAddress);
-
-            ConsoleColor color = ConsoleColor.Green;
-
-            if (a.IsWifi)
+            else
             {
-                sb.Append("  SSID ").Append(string.IsNullOrEmpty(a.Ssid) ? "?" : a.Ssid);
-                sb.Append("  [").Append(SignalBar(a.SignalPct)).Append("] ");
-                sb.Append(a.SignalPct.ToString(CultureInfo.InvariantCulture)).Append("% ");
-                sb.Append('(').Append(a.RssiDbm.ToString(CultureInfo.InvariantCulture)).Append(" dBm)");
-                if (a.WifiRxMbps > 0 || a.WifiTxMbps > 0)
-                    sb.Append("  rx/tx ").Append(Num(a.WifiRxMbps)).Append('/').Append(Num(a.WifiTxMbps)).Append(" Mbps");
-                if (a.SignalPct < cfg.WifiWeakSignalPct) color = ConsoleColor.Yellow;
-            }
-            outp.Add(new Line(sb.ToString(), color));
+                var r1 = new StringBuilder();
+                r1.Append(kindWord);
+                string aname = a.Name ?? "";
+                if (aname.Length > 0 && aname.IndexOf(kindWord, StringComparison.OrdinalIgnoreCase) < 0)
+                    r1.Append(' ').Append(aname);
+                if (!string.IsNullOrEmpty(a.IpAddress)) r1.Append("   ip ").Append(a.IpAddress);
+                if (a.LinkSpeedBps > 0) r1.Append("   link ").Append(Num(a.LinkSpeedBps / 1e6)).Append(" Mbps");
+                outp.Add(new Line(Card(r1.ToString(), cw), ConsoleColor.Cyan));
 
-            var sb2 = new StringBuilder();
-            sb2.Append("             ");
-            if (a.LinkSpeedBps > 0) sb2.Append("link ").Append(Num(a.LinkSpeedBps / 1e6)).Append(" Mbps  ");
-            sb2.Append("recv ").Append(Num(a.RecvMbps)).Append(" / send ").Append(Num(a.SendMbps)).Append(" Mbps");
-            if (a.InErrors > 0 || a.OutErrors > 0)
-                sb2.Append("   err in/out ").Append(a.InErrors.ToString(CultureInfo.InvariantCulture))
-                   .Append('/').Append(a.OutErrors.ToString(CultureInfo.InvariantCulture));
-            outp.Add(new Line(sb2.ToString(), (a.InErrors > 0 || a.OutErrors > 0) ? ConsoleColor.Yellow : def));
+                if (a.IsWifi)
+                {
+                    var w = new StringBuilder();
+                    w.Append("Wi-Fi  ").Append(string.IsNullOrEmpty(a.Ssid) ? "?" : a.Ssid);
+                    w.Append("  [").Append(SignalBar(a.SignalPct)).Append("] ")
+                     .Append(a.SignalPct.ToString(CultureInfo.InvariantCulture)).Append('%');
+                    w.Append(" (").Append(a.RssiDbm.ToString(CultureInfo.InvariantCulture)).Append(" dBm)");
+                    if (a.WifiRxMbps > 0 || a.WifiTxMbps > 0)
+                        w.Append("  rx/tx ").Append(Num(a.WifiRxMbps)).Append('/').Append(Num(a.WifiTxMbps));
+                    outp.Add(new Line(Card(w.ToString(), cw),
+                        a.SignalPct < cfg.WifiWeakSignalPct ? ConsoleColor.Yellow : ConsoleColor.Gray));
+                }
+
+                var r2 = new StringBuilder();
+                r2.Append("↓ recv ").Append(Num(a.RecvMbps)).Append("   ↑ send ").Append(Num(a.SendMbps)).Append(" Mbps");
+                if (a.InErrors > 0 || a.OutErrors > 0)
+                    r2.Append("   err in/out ").Append(a.InErrors.ToString(CultureInfo.InvariantCulture))
+                      .Append('/').Append(a.OutErrors.ToString(CultureInfo.InvariantCulture));
+                outp.Add(new Line(Card(r2.ToString(), cw),
+                    (a.InErrors > 0 || a.OutErrors > 0) ? ConsoleColor.Yellow : ConsoleColor.Gray));
+            }
+
+            if (v != null && v.Present)
+            {
+                var vr = new StringBuilder();
+                vr.Append("VPN  ").Append(string.IsNullOrEmpty(v.Vendor) ? "VPN" : v.Vendor).Append("  ");
+                vr.Append(v.Connected ? "CONNECTED" : "DISCONNECTED");
+                if (!string.IsNullOrEmpty(v.IpAddress)) vr.Append("  ip ").Append(v.IpAddress);
+                if (!string.IsNullOrEmpty(v.Gateway)) vr.Append("  gw ").Append(v.Gateway);
+                else if (v.Connected) vr.Append("  (no tunnel gw - set vpn_targets)");
+                outp.Add(new Line(Card(vr.ToString(), cw), v.Connected ? ConsoleColor.Green : ConsoleColor.Red));
+            }
+            else
+            {
+                outp.Add(new Line(Card("VPN  none detected", cw), ConsoleColor.DarkGray));
+            }
+
+            string status = a != null ? kindWord + " · up" : "no link";
+            outp.Add(new Line(TitledBorder('╰', '╯', " " + status + " ", inner), ConsoleColor.DarkCyan));
         }
 
-        private static void BuildVpn(System.Collections.Generic.List<Line> outp, VpnStatus v, ConsoleColor def)
+        // TARGETS card — the aligned ping table wrapped in a titled box.
+        private static void BuildTargetsCard(System.Collections.Generic.List<Line> outp, Snapshot snap, Config cfg, int width)
         {
-            if (v == null || !v.Present)
-            {
-                outp.Add(new Line("VPN          none detected", ConsoleColor.DarkGray));
-                return;
-            }
-            var sb = new StringBuilder();
-            sb.Append("VPN          ").Append(string.IsNullOrEmpty(v.Vendor) ? "VPN" : v.Vendor).Append("  ");
-            sb.Append(v.Connected ? "CONNECTED" : "DISCONNECTED");
-            if (!string.IsNullOrEmpty(v.IpAddress)) sb.Append("  ip ").Append(v.IpAddress);
-            if (!string.IsNullOrEmpty(v.Gateway)) sb.Append("  gw ").Append(v.Gateway);
-            else if (v.Connected) sb.Append("  (no tunnel gateway exposed - set vpn_targets)");
-            outp.Add(new Line(sb.ToString(), v.Connected ? ConsoleColor.Green : ConsoleColor.Red));
-        }
+            int inner = Math.Max(0, Math.Min(66, width - 2));
+            int cw = Math.Max(0, inner - 2);
 
-        private static void BuildTargets(System.Collections.Generic.List<Line> outp, Snapshot snap, Config cfg, ConsoleColor def, int width)
-        {
-            // Label the live column after the actual first configured window, not a fixed "1m".
             int w0 = (cfg.WindowsSec != null && cfg.WindowsSec.Length > 0) ? cfg.WindowsSec[0] : 60;
             string avgLabel = w0 == 60 ? "Avg1m" : (w0 % 60 == 0 ? "Avg" + (w0 / 60) + "m" : "Avg" + w0 + "s");
 
-            const int FixedCols = 69; // sum of the fixed column widths below (22+7+7+7+6+7+6+7)
+            // Tighter columns so the table fits inside the card interior; remainder is the spark.
+            const int cTarget = 18, cLast = 6, cAvg = 6, cMax = 6, cLoss = 5, cDrops = 6, cJit = 5, cP95 = 5;
+            const int colSum = cTarget + cLast + cAvg + cMax + cLoss + cDrops + cJit + cP95; // 57
+            int sparkRoom = Math.Max(0, cw - colSum);
 
-            outp.Add(new Line(
-                Pad("TARGET", 22) + Pad("Last", 7) + Pad(avgLabel, 7) + Pad("Max", 7) +
-                Pad("Loss", 6) + Pad("Drops", 7) + Pad("Jit", 6) + Pad("P95", 7) + "spark",
-                ConsoleColor.White));
+            outp.Add(new Line(TitledBorder('╭', '╮', " TARGETS ", inner), ConsoleColor.DarkCyan));
+
+            string header = Pad("TARGET", cTarget) + Pad("Last", cLast) + Pad(avgLabel, cAvg) + Pad("Max", cMax) +
+                            Pad("Loss", cLoss) + Pad("Drops", cDrops) + Pad("Jit", cJit) + Pad("P95", cP95) + "spark";
+            outp.Add(new Line(Card(header, cw), ConsoleColor.White));
 
             var targets = snap.Targets ?? new TargetSnapshot[0];
+            string worst = null;
+            double worstAvg = -1;
             foreach (var ts in targets)
             {
                 if (ts == null) continue;
                 WindowStat first = ts.First();
-
                 string label = ts.Target ?? "?";
-
                 string last = double.IsNaN(ts.LastMs) ? "-" : Num(ts.LastMs);
                 string avg = first != null ? Num(first.AvgMs) : "-";
                 string max = ts.SessionMaxMs > 0 ? Num(ts.SessionMaxMs) : "-";
@@ -230,19 +236,9 @@ namespace NetWatch
                 string p95 = first != null ? Num(first.P95Ms) : "-";
 
                 var sb = new StringBuilder();
-                sb.Append(Pad(label, 22));
-                sb.Append(Pad(last, 7));
-                sb.Append(Pad(avg, 7));
-                sb.Append(Pad(max, 7));
-                sb.Append(Pad(loss, 6));
-                sb.Append(Pad(drops, 7));
-                sb.Append(Pad(jit, 6));
-                sb.Append(Pad(p95, 7));
-                // Keep the NEWEST sparkline cells: budget to the remaining width and drop the
-                // OLDEST (left) cells, since right-edge truncation would otherwise hide the most
-                // recent latency — the "is it spiking now" signal.
+                sb.Append(Pad(label, cTarget)).Append(Pad(last, cLast)).Append(Pad(avg, cAvg)).Append(Pad(max, cMax));
+                sb.Append(Pad(loss, cLoss)).Append(Pad(drops, cDrops)).Append(Pad(jit, cJit)).Append(Pad(p95, cP95));
                 string spark = Spark(ts.Spark);
-                int sparkRoom = Math.Max(0, width - FixedCols);
                 if (spark.Length > sparkRoom) spark = spark.Substring(spark.Length - sparkRoom);
                 sb.Append(spark);
 
@@ -253,27 +249,38 @@ namespace NetWatch
                 else if (lossPct > 0 || avgMs > cfg.HighLatencyMs) color = ConsoleColor.Yellow;
                 bool emphasize = ts.Kind == TargetKind.Gateway || ts.Kind == TargetKind.Vpn;
                 if (emphasize && color == ConsoleColor.Green) color = ConsoleColor.Cyan;
+                outp.Add(new Line(Card(sb.ToString(), cw), color));
 
-                outp.Add(new Line(sb.ToString(), color));
+                if (avgMs > worstAvg) { worstAvg = avgMs; worst = label; }
             }
+
+            string status = targets.Length + (targets.Length == 1 ? " target" : " targets");
+            if (worst != null) status += " · worst " + worst;
+            outp.Add(new Line(TitledBorder('╰', '╯', " " + status + " ", inner), ConsoleColor.DarkCyan));
         }
 
         private static void BuildSpeed(System.Collections.Generic.List<Line> outp, Snapshot snap, Config cfg, ConsoleColor def, int width)
         {
             var sp = snap.LastSpeed;
+            int inner = Math.Max(0, Math.Min(66, width - 2)); // same geometry as the title card
+            int cw = Math.Max(0, inner - 2);                   // content width inside "│ " ... " │"
+
             if (sp == null || sp.Time == default(DateTime))
             {
-                outp.Add(new Line("SPEEDTEST    none yet", ConsoleColor.DarkGray));
+                outp.Add(new Line(TitledBorder('╭', '╮', " SPEEDTEST ", inner), ConsoleColor.DarkCyan));
+                outp.Add(new Line(Card("not run yet", cw), ConsoleColor.DarkGray));
+                outp.Add(new Line(TitledBorder('╰', '╯', " idle ", inner), ConsoleColor.DarkCyan));
                 return;
             }
             if (!string.IsNullOrEmpty(sp.Error))
             {
-                outp.Add(new Line("SPEEDTEST    error " + sp.Error + "  (" + Local(sp.Time) + ")", ConsoleColor.Red));
+                outp.Add(new Line(TitledBorder('╭', '╮', " SPEEDTEST ", inner), ConsoleColor.DarkCyan));
+                outp.Add(new Line(Card("error: " + sp.Error, cw), ConsoleColor.Red));
+                outp.Add(new Line(TitledBorder('╰', '╯',
+                    " " + sp.Time.ToLocalTime().ToString("HH:mm:ss", CultureInfo.InvariantCulture) + " ", inner),
+                    ConsoleColor.DarkCyan));
                 return;
             }
-            // Real result — a titled rounded-box card consistent with the dashboard header.
-            int inner = Math.Max(0, Math.Min(66, width - 2)); // same geometry as the title card
-            int cw = Math.Max(0, inner - 2);                   // content width inside "│ " ... " │"
 
             double down = (!double.IsNaN(sp.DownMbps) && sp.DownMbps > 0) ? sp.DownMbps : 0;
             double up = (!double.IsNaN(sp.UpMbps) && sp.UpMbps > 0) ? sp.UpMbps : 0;
@@ -394,20 +401,44 @@ namespace NetWatch
             return nice * pow;
         }
 
-        private static void BuildTrace(System.Collections.Generic.List<Line> outp, Snapshot snap, ConsoleColor def)
+        // TRACE / EVENTS card — last traceroute summary plus the most recent diagnostic events.
+        private static void BuildTraceEventsCard(System.Collections.Generic.List<Line> outp, Snapshot snap, int width)
         {
+            int inner = Math.Max(0, Math.Min(66, width - 2));
+            int cw = Math.Max(0, inner - 2);
+
+            outp.Add(new Line(TitledBorder('╭', '╮', " TRACE / EVENTS ", inner), ConsoleColor.DarkCyan));
+
             var t = snap.LastTrace;
+            string status = "—";
             if (t == null || t.Time == default(DateTime))
             {
-                outp.Add(new Line("TRACE        none yet", ConsoleColor.DarkGray));
-                return;
+                outp.Add(new Line(Card("trace  none yet", cw), ConsoleColor.DarkGray));
             }
-            int hops = t.Hops != null ? t.Hops.Length : 0;
-            var sb = new StringBuilder();
-            sb.Append("TRACE        ").Append(t.Target ?? "?").Append("  ").Append(hops.ToString(CultureInfo.InvariantCulture)).Append(" hops");
-            sb.Append("  ").Append(Local(t.Time));
-            sb.Append("  (path ").Append(t.Changed ? "CHANGED" : "stable").Append(')');
-            outp.Add(new Line(sb.ToString(), t.Changed ? ConsoleColor.Yellow : def));
+            else
+            {
+                int hops = t.Hops != null ? t.Hops.Length : 0;
+                var tr = new StringBuilder();
+                tr.Append("trace  ").Append(t.Target ?? "?").Append("  ").Append(hops.ToString(CultureInfo.InvariantCulture)).Append(" hops");
+                tr.Append("  ").Append(t.Time.ToLocalTime().ToString("HH:mm:ss", CultureInfo.InvariantCulture));
+                tr.Append("  (path ").Append(t.Changed ? "CHANGED" : "stable").Append(')');
+                outp.Add(new Line(Card(tr.ToString(), cw), t.Changed ? ConsoleColor.Yellow : ConsoleColor.Gray));
+                status = (t.Target ?? "?") + " · " + (t.Changed ? "CHANGED" : "stable");
+            }
+
+            var ev = snap.RecentEvents ?? new string[0];
+            if (ev.Length == 0)
+            {
+                outp.Add(new Line(Card("events  (none)", cw), ConsoleColor.DarkGray));
+            }
+            else
+            {
+                int start = Math.Max(0, ev.Length - 3); // newest 3, never wrap the card
+                for (int i = start; i < ev.Length; i++)
+                    outp.Add(new Line(Card("• " + ev[i], cw), ConsoleColor.DarkGray));
+            }
+
+            outp.Add(new Line(TitledBorder('╰', '╯', " " + status + " ", inner), ConsoleColor.DarkCyan));
         }
 
         // ---- rendering helpers ----
