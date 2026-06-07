@@ -1,4 +1,5 @@
 using System;
+using System.Diagnostics;
 using System.Globalization;
 using System.Net;
 using System.Net.NetworkInformation;
@@ -95,15 +96,27 @@ namespace NetWatch
 
                 using (var ping = new System.Net.NetworkInformation.Ping())
                 {
+                    var sw = Stopwatch.StartNew();
                     PingReply reply = ping.Send(dest, timeoutMs, buffer, options);
+                    sw.Stop();
 
                     sample.Time = DateTime.UtcNow;
 
                     if (reply != null && reply.Status == IPStatus.Success)
                     {
                         sample.Success = true;
-                        // RoundtripTime is the OS-observed round-trip in ms (long).
-                        sample.RttMs = Convert.ToDouble(reply.RoundtripTime, CultureInfo.InvariantCulture);
+                        // RoundtripTime is the OS-observed round-trip in whole ms (long).
+                        // It is accurate and overhead-free for >= 1 ms (internet/VPN). For a
+                        // sub-millisecond LAN reply it truncates to 0, so fall back to the
+                        // measured wall-clock there to show the fractional millisecond
+                        // (e.g. a router at 0.3 ms instead of a meaningless 0).
+                        double rt = Convert.ToDouble(reply.RoundtripTime, CultureInfo.InvariantCulture);
+                        if (rt < 1.0)
+                        {
+                            double measured = sw.Elapsed.TotalMilliseconds;
+                            rt = measured < 1.0 ? measured : 0.99; // keep it clearly sub-ms
+                        }
+                        sample.RttMs = rt;
                     }
                     else
                     {
