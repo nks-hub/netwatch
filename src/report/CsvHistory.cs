@@ -162,7 +162,11 @@ namespace NetWatch.Report
             StreamReader reader = null;
             try
             {
-                reader = new StreamReader(path);
+                // Open shared for read+write: while NetWatch is running it keeps these
+                // CSV files open for appending, so a plain StreamReader (FileShare.Read)
+                // would hit a sharing violation and the report would come up empty.
+                reader = new StreamReader(
+                    new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite));
             }
             catch
             {
