@@ -200,6 +200,7 @@ namespace NetWatch
             }
 
             long[] counts = new long[DownStreams];
+            string[] errs = new string[DownStreams];
             var deadline = DateTime.UtcNow.AddMilliseconds(DownPhaseCapMs);
 
             var sw = Stopwatch.StartNew();
@@ -210,7 +211,8 @@ namespace NetWatch
                 int idx = i;
                 tasks[i] = Task.Run(() =>
                 {
-                    counts[idx] = DownloadStream(downUrl, deadline, "dl" + idx.ToString(CultureInfo.InvariantCulture));
+                    counts[idx] = DownloadStream(downUrl, deadline,
+                        "dl" + idx.ToString(CultureInfo.InvariantCulture), out errs[idx]);
                 });
             }
 
@@ -226,14 +228,34 @@ namespace NetWatch
 
             double seconds = sw.Elapsed.TotalSeconds;
             if (total > 0 && seconds > 0.0001)
+            {
                 result.DownMbps = total * 8.0 / seconds / 1e6;
-            else
-                AppendError(result, "down: no bytes");
+                return;
+            }
+
+            // Fallback: a single fresh connection often succeeds when the 4-way parallel
+            // burst was rate-limited or a transient blocked every stream at once.
+            string fbErr;
+            var fbDeadline = DateTime.UtcNow.AddMilliseconds(DownPhaseCapMs);
+            var fbSw = Stopwatch.StartNew();
+            long fb = DownloadStream(downUrl, fbDeadline, "dlfb", out fbErr);
+            fbSw.Stop();
+            double fbSec = fbSw.Elapsed.TotalSeconds;
+            if (fb > 0 && fbSec > 0.0001)
+            {
+                result.DownMbps = fb * 8.0 / fbSec / 1e6;
+                return;
+            }
+
+            // Still nothing — report the concrete reason instead of a bare "no bytes".
+            string reason = FirstNonEmpty(errs) ?? fbErr;
+            AppendError(result, "down: " + (string.IsNullOrEmpty(reason) ? "no data (server unreachable?)" : reason));
         }
 
-        private static long DownloadStream(string url, DateTime deadline, string connectionGroup)
+        private static long DownloadStream(string url, DateTime deadline, string connectionGroup, out string err)
         {
             long bytes = 0;
+            err = null;
             try
             {
                 var req = NewRequest(url, "GET",
@@ -250,9 +272,10 @@ namespace NetWatch
                     }
                 }
             }
-            catch
+            catch (Exception ex)
             {
-                // Return whatever we managed to read before failure.
+                // Keep the concrete reason so the caller can report WHY, not just "no bytes".
+                err = Short(ex);
             }
             return bytes;
         }
@@ -267,6 +290,7 @@ namespace NetWatch
         {
             long[] counts = new long[UpStreams];
             long[] elapsedTicks = new long[UpStreams];
+            string[] errs = new string[UpStreams];
             var deadline = DateTime.UtcNow.AddMilliseconds(UpPhaseCapMs);
 
             var tasks = new Task[UpStreams];
@@ -276,7 +300,7 @@ namespace NetWatch
                 tasks[i] = Task.Run(() =>
                 {
                     counts[idx] = UploadStream(UpChunkBytes, deadline,
-                        "ul" + idx.ToString(CultureInfo.InvariantCulture), out elapsedTicks[idx]);
+                        "ul" + idx.ToString(CultureInfo.InvariantCulture), out elapsedTicks[idx], out errs[idx]);
                 });
             }
 
@@ -297,15 +321,32 @@ namespace NetWatch
 
             double seconds = (double)maxTicks / Stopwatch.Frequency;
             if (total > 0 && seconds > 0.0001)
+            {
                 result.UpMbps = total * 8.0 / seconds / 1e6;
-            else
-                AppendError(result, "up: no bytes");
+                return;
+            }
+
+            // Fallback: a single fresh stream when the parallel burst yielded nothing.
+            long fbTicks;
+            string fbErr;
+            var fbDeadline = DateTime.UtcNow.AddMilliseconds(UpPhaseCapMs);
+            long fb = UploadStream(UpChunkBytes, fbDeadline, "ulfb", out fbTicks, out fbErr);
+            double fbSec = (double)fbTicks / Stopwatch.Frequency;
+            if (fb > 0 && fbSec > 0.0001)
+            {
+                result.UpMbps = fb * 8.0 / fbSec / 1e6;
+                return;
+            }
+
+            string reason = FirstNonEmpty(errs) ?? fbErr;
+            AppendError(result, "up: " + (string.IsNullOrEmpty(reason) ? "no data (server unreachable?)" : reason));
         }
 
-        private static long UploadStream(long size, DateTime deadline, string connectionGroup, out long elapsedTicks)
+        private static long UploadStream(long size, DateTime deadline, string connectionGroup, out long elapsedTicks, out string err)
         {
             long sent = 0;
             elapsedTicks = 0;
+            err = null;
             try
             {
                 var req = NewRequest(UpUrl, "POST",
@@ -340,10 +381,11 @@ namespace NetWatch
                 using (var rs = resp.GetResponseStream())
                     DrainAndDiscard(rs);
             }
-            catch
+            catch (Exception ex)
             {
                 // A failed stream contributes no throughput sample.
                 elapsedTicks = 0;
+                err = Short(ex);
                 return 0;
             }
             return sent;
@@ -408,9 +450,35 @@ namespace NetWatch
 
         private static string Short(Exception ex)
         {
+            // Surface a clear, locale-independent reason for network failures
+            // (the OS-localized WebException.Message is inconsistent across machines).
+            var we = ex as WebException;
+            if (we != null)
+            {
+                var resp = we.Response as HttpWebResponse;
+                if (resp != null)
+                {
+                    int code = (int)resp.StatusCode;
+                    string name = resp.StatusCode.ToString();
+                    // Older HttpStatusCode enums have no name for some codes (e.g. 429),
+                    // where ToString() is just the number — avoid printing "429 429".
+                    return name == code.ToString(CultureInfo.InvariantCulture)
+                        ? "HTTP " + code
+                        : "HTTP " + code + " " + name;
+                }
+                return "network: " + we.Status; // ConnectFailure / Timeout / NameResolutionFailure / ...
+            }
             var msg = ex.Message ?? ex.GetType().Name;
             if (msg.Length > 120) msg = msg.Substring(0, 120);
             return msg;
+        }
+
+        private static string FirstNonEmpty(string[] a)
+        {
+            if (a == null) return null;
+            foreach (var s in a)
+                if (!string.IsNullOrEmpty(s)) return s;
+            return null;
         }
     }
 }
