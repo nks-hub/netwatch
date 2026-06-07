@@ -45,6 +45,7 @@ namespace NetWatch
             bool once = false;
             bool noUi = false;
             bool frame = false;
+            int frameWidth = 100; // width for -frame rendering (optional arg overrides)
 
             for (int i = 0; i < args.Length; i++)
             {
@@ -84,6 +85,16 @@ namespace NetWatch
                     case "--frame":
                     case "-status":
                         frame = true;
+                        // Optional width argument: consume the next token only when it
+                        // parses as a positive integer (e.g. "-frame 160"); otherwise keep
+                        // the default so "-frame" alone still works.
+                        if (i + 1 < args.Length &&
+                            int.TryParse(args[i + 1], NumberStyles.Integer, CultureInfo.InvariantCulture, out int fw) &&
+                            fw > 0)
+                        {
+                            frameWidth = fw;
+                            i++;
+                        }
                         break;
                     case "-version":
                     case "--version":
@@ -162,7 +173,7 @@ namespace NetWatch
             try
             {
                 if (frame)
-                    return RunFrame(cfg, agg, log, thState, targets);
+                    return RunFrame(cfg, agg, log, thState, targets, frameWidth);
                 if (once)
                     return RunOnce(cfg, agg, log, thState, targets);
                 return RunContinuous(cfg, agg, log, thState, targets, noUi);
@@ -294,7 +305,7 @@ namespace NetWatch
         // =====================================================================
 
         private static int RunFrame(Config cfg, Aggregator agg, LogWriter log,
-            ThroughputState thState, List<Target> targets)
+            ThroughputState thState, List<Target> targets, int width)
         {
             try { Console.OutputEncoding = System.Text.Encoding.UTF8; } catch { }
 
@@ -339,7 +350,7 @@ namespace NetWatch
                 catch { }
             }
 
-            Console.Write(Dashboard.RenderToText(agg.Snapshot(), cfg, DateTime.UtcNow, 100));
+            Console.Write(Dashboard.RenderToText(agg.Snapshot(), cfg, DateTime.UtcNow, width > 0 ? width : 100));
             FlushEvents(agg, log);
             return 0;
         }
@@ -994,7 +1005,8 @@ namespace NetWatch
             Console.WriteLine("                   (default: netwatch.conf next to the EXE)");
             Console.WriteLine("  -logdir <path>   Override the log/CSV output directory");
             Console.WriteLine("  -once            Run a single diagnostic pass, print a report, exit");
-            Console.WriteLine("  -frame           Print one live dashboard frame to stdout and exit");
+            Console.WriteLine("  -frame [width]   Print one live dashboard frame to stdout and exit");
+            Console.WriteLine("                   (optional render width, e.g. -frame 160; default 100)");
             Console.WriteLine("  -no-ui           Continuous monitoring without the live dashboard");
             Console.WriteLine("  -version         Print version and exit");
             Console.WriteLine("  -h, -help        Show this help and exit");

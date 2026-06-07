@@ -67,7 +67,7 @@ namespace NetWatch
                 ConsoleRefreshMs = 1000,
                 LogDir = "logs",
                 WindowsSec = new[] { 60, 300, 900, 3600 },
-                SparkLen = 40,
+                SparkLen = 120,
                 WifiWeakSignalPct = 40,
                 HighLatencyMs = 150,
                 HighLossPct = 5

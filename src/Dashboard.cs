@@ -15,6 +15,15 @@ namespace NetWatch
         private const string Repo = BuildInfo.Repo;
         private const string Author = BuildInfo.Author;
 
+        // Cards span the window up to this many interior columns so a wide console is
+        // used, while a hard cap keeps the layout readable on ultra-wide terminals.
+        private const int MaxCardWidth = 120;
+
+        // Shared responsive card interior width: fills the window (width-2 for the two
+        // border columns) up to MaxCardWidth, clamped to >= 0. Every card and the header
+        // box derive their geometry from this so borders/content stay aligned.
+        private static int CardInner(int width) => Math.Max(0, Math.Min(width - 2, MaxCardWidth));
+
         private const int STD_OUTPUT_HANDLE = -11;
         private const uint ENABLE_WRAP_AT_EOL_OUTPUT = 0x0002;
         [DllImport("kernel32.dll", SetLastError = true)] private static extern IntPtr GetStdHandle(int nStdHandle);
@@ -179,7 +188,7 @@ namespace NetWatch
                            up.Minutes.ToString("00", CultureInfo.InvariantCulture) + ":" +
                            up.Seconds.ToString("00", CultureInfo.InvariantCulture);
             string now = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture);
-            int inner = Math.Max(0, Math.Min(66, width - 2));
+            int inner = CardInner(width);
             outp.Add(new Line("╭" + new string('─', inner) + "╮", ConsoleColor.DarkCyan));
             outp.Add(new Line("│ " + Fit("NetWatch v1.0    network & VPN latency diagnostics", inner - 2) + " │", ConsoleColor.Cyan));
             outp.Add(new Line("│ " + Fit("by " + Author + "  ·  " + Repo, inner - 2) + " │", ConsoleColor.DarkGray));
@@ -208,7 +217,7 @@ namespace NetWatch
         // LINK card — active adapter (+ Wi-Fi signal + throughput) and VPN status, merged.
         private static void BuildLinkCard(System.Collections.Generic.List<Line> outp, Snapshot snap, Config cfg, int width)
         {
-            int inner = Math.Max(0, Math.Min(66, width - 2));
+            int inner = CardInner(width);
             int cw = Math.Max(0, inner - 2);
             var a = snap.ActiveInterface;
             var v = snap.Vpn;
@@ -275,16 +284,19 @@ namespace NetWatch
         // TARGETS card — the aligned ping table wrapped in a titled box.
         private static void BuildTargetsCard(System.Collections.Generic.List<Line> outp, Snapshot snap, Config cfg, int width)
         {
-            int inner = Math.Max(0, Math.Min(66, width - 2));
+            int inner = CardInner(width);
             int cw = Math.Max(0, inner - 2);
 
             int w0 = (cfg.WindowsSec != null && cfg.WindowsSec.Length > 0) ? cfg.WindowsSec[0] : 60;
             string avgLabel = w0 == 60 ? "Avg1m" : (w0 % 60 == 0 ? "Avg" + (w0 / 60) + "m" : "Avg" + w0 + "s");
 
-            // Tighter columns so the table fits inside the card interior; remainder is the spark.
-            const int cTarget = 18, cLast = 6, cAvg = 6, cMax = 6, cLoss = 5, cDrops = 6, cJit = 5, cP95 = 5;
-            const int colSum = cTarget + cLast + cAvg + cMax + cLoss + cDrops + cJit + cP95; // 57
-            int sparkRoom = Math.Max(0, cw - colSum);
+            // Numeric columns stay fixed; the TARGET name column and the sparkline grow with
+            // cw so long hostnames show in full and more latency history fits on wide windows.
+            const int cLast = 6, cAvg = 6, cMax = 6, cLoss = 5, cDrops = 6, cJit = 5, cP95 = 5;
+            const int cNumeric = cLast + cAvg + cMax + cLoss + cDrops + cJit + cP95; // 39
+            const int desiredSpark = 16; // sparkline cells we aim to leave when there is room
+            int cTarget = Clamp(cw - cNumeric - desiredSpark, 18, 40);
+            int sparkRoom = Math.Max(0, cw - cNumeric - cTarget);
 
             outp.Add(new Line(TitledBorder('╭', '╮', " TARGETS ", inner), ConsoleColor.DarkCyan));
 
@@ -335,7 +347,7 @@ namespace NetWatch
         private static void BuildSpeed(System.Collections.Generic.List<Line> outp, Snapshot snap, Config cfg, ConsoleColor def, int width)
         {
             var sp = snap.LastSpeed;
-            int inner = Math.Max(0, Math.Min(66, width - 2)); // same geometry as the title card
+            int inner = CardInner(width); // same responsive geometry as every other card
             int cw = Math.Max(0, inner - 2);                   // content width inside "│ " ... " │"
 
             if (sp == null || sp.Time == default(DateTime))
@@ -477,7 +489,7 @@ namespace NetWatch
         // TRACE / EVENTS card — last traceroute summary plus the most recent diagnostic events.
         private static void BuildTraceEventsCard(System.Collections.Generic.List<Line> outp, Snapshot snap, int width)
         {
-            int inner = Math.Max(0, Math.Min(66, width - 2));
+            int inner = CardInner(width);
             int cw = Math.Max(0, inner - 2);
 
             outp.Add(new Line(TitledBorder('╭', '╮', " TRACE / ALERTS ", inner), ConsoleColor.DarkCyan));
@@ -593,6 +605,14 @@ namespace NetWatch
         {
             if (double.IsNaN(v) || double.IsInfinity(v)) return "-";
             return v.ToString("0.##", CultureInfo.InvariantCulture);
+        }
+
+        // Clamp v into [lo, hi] (net48 has no Math.Clamp). Assumes lo <= hi.
+        private static int Clamp(int v, int lo, int hi)
+        {
+            if (v < lo) return lo;
+            if (v > hi) return hi;
+            return v;
         }
 
         private static string Pad(string s, int width)
