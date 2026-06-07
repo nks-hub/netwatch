@@ -132,7 +132,10 @@ namespace NetWatch.Report
             }
             sb.Append("</defs>");
 
-            // ---- Y gridlines + value labels (thin, muted; no heavy frame) ----
+            // ---- Y axis: horizontal gridlines + value labels (thin, muted; no heavy
+            // frame). Wrapped in g.nw-yaxis so the report JS can hide/replace the
+            // server-rendered ticks + gridlines when the Y domain is rescaled. ----
+            sb.Append("<g class=\"nw-yaxis\">");
             int ySteps = 4;
             for (int i = 0; i <= ySteps; i++)
             {
@@ -152,25 +155,37 @@ namespace NetWatch.Report
                   .Append("\" font-size=\"10\" text-anchor=\"end\">")
                   .Append(Esc(label)).Append("</text>");
             }
+            sb.Append("</g>");
 
-            // ---- X axis time labels + faint verticals ----
+            // ---- X axis: faint vertical gridlines (g.nw-grid) + time labels
+            // (g.nw-xaxis). Split into two groups so the report JS can independently
+            // hide/replace the vertical gridlines and the X tick texts on zoom/pan. ----
             bool shortSpan = (to - from) < TimeSpan.FromMinutes(15);
             string timeFmt = shortSpan ? "HH:mm:ss" : "HH:mm";
             int xSteps = 5;
+
+            // Vertical gridlines first (kept below series/labels, identical to before).
+            sb.Append("<g class=\"nw-grid\">");
+            for (int i = 1; i <= xSteps; i++)
+            {
+                double frac = (double)i / xSteps;
+                double x = left + frac * plotW;
+
+                // Skip the leftmost vertical (i==0) so it doesn't double the Y baseline.
+                sb.Append("<line x1=\"").Append(N(x)).Append("\" y1=\"").Append(N(top))
+                  .Append("\" x2=\"").Append(N(x)).Append("\" y2=\"").Append(N(bottom))
+                  .Append("\" stroke=\"").Append(GridColor)
+                  .Append("\" stroke-width=\"1\" shape-rendering=\"crispEdges\"/>");
+            }
+            sb.Append("</g>");
+
+            // X tick texts.
+            sb.Append("<g class=\"nw-xaxis\">");
             for (int i = 0; i <= xSteps; i++)
             {
                 double frac = (double)i / xSteps;
                 double x = left + frac * plotW;
                 DateTime t = from.AddTicks((long)(frac * spanTicks));
-
-                // Skip the leftmost vertical so it doesn't double the Y baseline.
-                if (i > 0)
-                {
-                    sb.Append("<line x1=\"").Append(N(x)).Append("\" y1=\"").Append(N(top))
-                      .Append("\" x2=\"").Append(N(x)).Append("\" y2=\"").Append(N(bottom))
-                      .Append("\" stroke=\"").Append(GridColor)
-                      .Append("\" stroke-width=\"1\" shape-rendering=\"crispEdges\"/>");
-                }
 
                 string anchor = i == 0 ? "start" : (i == xSteps ? "end" : "middle");
                 sb.Append("<text x=\"").Append(N(x)).Append("\" y=\"").Append(N(bottom + 16))
@@ -178,6 +193,7 @@ namespace NetWatch.Report
                   .Append("\" font-size=\"10\" text-anchor=\"").Append(anchor).Append("\">")
                   .Append(Esc(t.ToString(timeFmt, Inv))).Append("</text>");
             }
+            sb.Append("</g>");
 
             // ---- Data series: area fill (clipped) + crisp stroke, broken at gaps ----
             double yRange = yMax - yMin;
@@ -263,6 +279,12 @@ namespace NetWatch.Report
                     lx += 18 + label.Length * 6.2 + 14;
                 }
             }
+
+            // ---- Empty dynamic overlay layer ----
+            // LAST child of the root <svg>: drawn on top of the series (and below the
+            // JS crosshair overlay the report injects). The report JS draws zoomed
+            // lines/areas/axes into this group; it is intentionally empty at render.
+            sb.Append("<g class=\"nw-dynamic\"></g>");
 
             sb.Append("</svg>");
             return sb.ToString();
@@ -445,16 +467,34 @@ namespace NetWatch.Report
         // Compose the space-separated "epochMs,value" list of PRESENT samples for a
         // series (missing / NaN / Infinity omitted). Invariant culture, '.' decimal.
         // No XML-unsafe characters are produced (digits, '.', ',', '-', ' ' only).
+        // The list is AUTHORITATIVE for the report JS (it redraws from it on zoom),
+        // so it is exact, complete and SORTED ASCENDING by time.
         private static string BuildPointsAttr(ChartSeries s, DateTime from)
         {
             if (s == null || s.Points == null || s.Points.Count == 0) return "";
-            var pb = new StringBuilder(s.Points.Count * 16);
-            bool first = true;
+
+            // Collect present samples (epoch-ms key + original value) so we can emit
+            // them in strictly ascending time order regardless of source ordering.
+            var pts = new List<KeyValuePair<long, double>>(s.Points.Count);
             foreach (var p in s.Points)
             {
                 if (p.Missing || double.IsNaN(p.Value) || double.IsInfinity(p.Value)) continue;
+                long key = (long)Math.Round(EpochMs(p.Time));
+                pts.Add(new KeyValuePair<long, double>(key, p.Value));
+            }
+            if (pts.Count == 0) return "";
+
+            // Stable ascending sort by time (OrderBy is stable in System.Linq, but we
+            // avoid Linq: List.Sort is fine here since equal times keep relative order
+            // only loosely — duplicates at the same ms are rare bucket boundaries).
+            pts.Sort((a, b) => a.Key.CompareTo(b.Key));
+
+            var pb = new StringBuilder(pts.Count * 16);
+            bool first = true;
+            foreach (var kv in pts)
+            {
                 if (!first) pb.Append(' ');
-                pb.Append(Ms(EpochMs(p.Time))).Append(',').Append(Num(p.Value));
+                pb.Append(kv.Key.ToString("0", Inv)).Append(',').Append(Num(kv.Value));
                 first = false;
             }
             return pb.ToString();

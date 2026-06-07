@@ -404,13 +404,18 @@ namespace NetWatch.Report
             WindowRender w60 = RenderWindow(title, yUnit, factory, nowLocal, Win60Min, yMin, yMax);
             WindowRender w24 = RenderWindow(title, yUnit, factory, nowLocal, Win24H, yMin, yMax);
 
-            sb.Append("<section class=\"card metric\">");
+            // data-unit lets the export filenames / CSV header use the metric unit;
+            // data-metric carries the title so PNG/CSV downloads are named per metric.
+            sb.Append("<section class=\"card metric\" data-metric=\"").Append(Esc(title))
+              .Append("\" data-unit=\"").Append(Esc(yUnit)).Append("\">");
 
             sb.Append("<div class=\"card-head\">");
             sb.Append("<h2>").Append(Esc(title))
               .Append(" <span class=\"unit\">").Append(Esc(yUnit)).Append("</span></h2>");
             if (!string.IsNullOrEmpty(description))
                 sb.Append("<p class=\"desc\">").Append(Esc(description)).Append("</p>");
+            // Per-chart toolbar (top-right, appears on hover; keyboard focusable).
+            AppendToolbar(sb);
             sb.Append("</div>");
 
             // The legend is identical across windows (same series), so show it once.
@@ -431,6 +436,31 @@ namespace NetWatch.Report
             sb.Append("</div>");
 
             sb.Append("</section>");
+        }
+
+        // Per-chart toolbar: a row of focusable icon buttons in the card's top-right.
+        // Each button carries a data-act the inline JS dispatches on; titles + aria
+        // labels keep it accessible. Glyphs are plain Unicode so it stays offline.
+        private static void AppendToolbar(StringBuilder sb)
+        {
+            sb.Append("<div class=\"nw-tools\" role=\"toolbar\" aria-label=\"Chart tools\">");
+            ToolBtn(sb, "reset", "↺", "Reset zoom");
+            ToolBtn(sb, "png", "⬇︎", "Download PNG");
+            ToolBtn(sb, "csv", "CSV", "Download CSV");
+            ToolBtn(sb, "full", "⛶", "Fullscreen");
+            ToolBtn(sb, "area", "▧", "Toggle area fill");
+            ToolBtn(sb, "smooth", "∿", "Toggle smoothing");
+            ToolBtn(sb, "log", "log", "Toggle log / linear Y scale");
+            sb.Append("</div>");
+        }
+
+        private static void ToolBtn(StringBuilder sb, string act, string glyph, string label)
+        {
+            sb.Append("<button type=\"button\" class=\"nw-tb nw-tb-").Append(act)
+              .Append("\" data-act=\"").Append(act)
+              .Append("\" title=\"").Append(Esc(label))
+              .Append("\" aria-label=\"").Append(Esc(label)).Append("\">")
+              .Append(glyph).Append("</button>");
         }
 
         // One rendered window: its SVG markup plus the series it was built from.
@@ -698,12 +728,28 @@ namespace NetWatch.Report
             sb.Append("<meta charset=\"utf-8\">");
             sb.Append("<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">");
             sb.Append("<meta name=\"color-scheme\" content=\"dark\">");
-            // Auto-reload so an open tab shows fresh data while the app keeps rewriting
-            // report.html in the background (matches the default report interval).
-            sb.Append("<meta http-equiv=\"refresh\" content=\"60\">");
+            // NOTE: auto-reload is driven by a JS setTimeout(location.reload, 60s) wired
+            // in Js() so the Pause control can cancel it (a static <meta refresh> cannot
+            // be paused). The generated time is published to the body via data-gen so the
+            // "updated <ago>" hint can tick without a server round-trip.
             sb.Append("<title>NetWatch — ").Append(Esc(machine)).Append("</title>");
             sb.Append("<style>").Append(Css()).Append("</style>");
-            sb.Append("</head><body>");
+            // Publish the generation wall-clock as epoch-ms (no TZ offset, matching the
+            // SvgChart encoding) so the JS "updated <ago>" hint and refresh timer work
+            // entirely offline.
+            sb.Append("</head><body data-gen=\"").Append(GenEpochMs(nowLocal)).Append("\">");
+        }
+
+        // Generation time as integer epoch-ms of the LOCAL wall-clock (no timezone
+        // offset), the same convention SvgChart uses for data-xfrom/xto.
+        private static readonly DateTime UnixEpochUnspecified =
+            new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Unspecified);
+
+        private static string GenEpochMs(DateTime nowLocal)
+        {
+            double ms = (nowLocal - UnixEpochUnspecified).TotalMilliseconds;
+            if (double.IsNaN(ms) || double.IsInfinity(ms)) return "0";
+            return Math.Round(ms).ToString("0", CultureInfo.InvariantCulture);
         }
 
         private static void WriteHeader(StringBuilder sb, DateTime nowLocal)
@@ -734,7 +780,15 @@ namespace NetWatch.Report
               .Append(Esc(machine)).Append("</span></span>");
             sb.Append("<span class=\"hm\"><span class=\"hm-k\">Generated</span><span class=\"hm-v mono\">")
               .Append(Esc(generated)).Append("</span></span>");
-            sb.Append("<span class=\"pill\"><span class=\"pulse\"></span>auto-refresh 60s</span>");
+            // Pause auto-refresh control: a clickable pill. The inline JS owns the
+            // 60s reload timer (no <meta refresh>), toggles paused state + persists it,
+            // and updates the "updated <ago>" hint. aria-pressed reflects paused state.
+            sb.Append("<button type=\"button\" class=\"pill nw-refresh\" id=\"nw-refresh\" ")
+              .Append("aria-pressed=\"false\" aria-label=\"Pause auto-refresh\" ")
+              .Append("title=\"Pause / resume the 60s auto-refresh\">")
+              .Append("<span class=\"pulse\"></span>")
+              .Append("<span class=\"nw-refresh-txt\">auto-refresh 60s</span></button>");
+            sb.Append("<span class=\"nw-updated\" id=\"nw-updated\" aria-live=\"polite\"></span>");
             sb.Append("</div>");
 
             sb.Append("</header>");
@@ -839,72 +893,242 @@ namespace NetWatch.Report
                 "function p(n){return(n<10?'0':'')+n;}" +
                 "return p(d.getUTCHours())+':'+p(d.getUTCMinutes())+':'+p(d.getUTCSeconds());}" +
 
-                // Wire one svg.nw-chart: crosshair + dots + tooltip on hover.
+                // Small HTML-escape for tooltip text built via innerHTML.
+                "function esc(s){s=''+s;return s.replace(/&/g,'&amp;').replace(/</g,'&lt;')" +
+                ".replace(/>/g,'&gt;').replace(/\"/g,'&quot;');}" +
+
+                // Build an SVG element with attributes in one call.
+                "function mk(tag,at){var e=document.createElementNS(SVGNS,tag);" +
+                "if(at){for(var k in at){if(at.hasOwnProperty(k))e.setAttribute(k,at[k]);}}return e;}" +
+
+                // \"Nice\" axis step for a span/target-tick-count (1/2/2.5/5 * 10^n).
+                "function niceStep(span,want){if(!(span>0))return 1;" +
+                "var raw=span/(want>0?want:4);var mag=Math.pow(10,Math.floor(Math.log(raw)/Math.LN10));" +
+                "var n=raw/mag;var s;if(n<1.5)s=1;else if(n<3)s=2;else if(n<7)s=5;else s=10;return s*mag;}" +
+
+                // Visible (legend-not-hidden) series <g> nodes of a chart, in order.
+                "function visSeries(svg){var all=svg.querySelectorAll('g.nw-series');var r=[];" +
+                "for(var i=0;i<all.length;i++){if(all[i].style.display!=='none')r.push(all[i]);}return r;}" +
+
+                // Registry of every wired chart controller (for synced crosshair etc.).
+                "var CHARTS=[];" +
+
+                // Wire one svg.nw-chart into a full interactive controller:
+                // zoom/brush/wheel/pan, redraw-from-data-points with Y auto-rescale,
+                // crosshair + dots + tooltip (using the CURRENT domain/scale), and
+                // toggles (area/smoothing/log). Returns the controller (also stored on
+                // svg._nwc and pushed to CHARTS).
                 "function wireChart(svg){" +
-                "if(svg._nwWired)return;svg._nwWired=1;" +
+                "if(svg._nwc)return svg._nwc;" +
                 "var L=parseFloat(svg.getAttribute('data-l'));" +
                 "var T=parseFloat(svg.getAttribute('data-t'));" +
                 "var W=parseFloat(svg.getAttribute('data-w'));" +
                 "var H=parseFloat(svg.getAttribute('data-h'));" +
                 "var XF=parseFloat(svg.getAttribute('data-xfrom'));" +
                 "var XT=parseFloat(svg.getAttribute('data-xto'));" +
-                "var YMIN=parseFloat(svg.getAttribute('data-ymin'));" +
-                "var YMAX=parseFloat(svg.getAttribute('data-ymax'));" +
+                "var YMIN0=parseFloat(svg.getAttribute('data-ymin'));" +
+                "var YMAX0=parseFloat(svg.getAttribute('data-ymax'));" +
                 "var unit=svg.getAttribute('data-unit')||'';" +
-                "if(!(W>0)||!(H>0)||!(XT>XF)||!(YMAX>YMIN))return;" +
-                // Map data -> svg user units exactly as the chart was drawn.
-                "function xOf(t){return L+(t-XF)/(XT-XF)*W;}" +
-                "function yOf(v){return T+(1-(v-YMIN)/(YMAX-YMIN))*H;}" +
-                // Overlay group (crosshair line + dots) appended last so it sits on top.
-                "var ov=document.createElementNS(SVGNS,'g');ov.setAttribute('pointer-events','none');" +
-                "svg.appendChild(ov);" +
-                "var cross=document.createElementNS(SVGNS,'line');cross.setAttribute('class','nw-cross');" +
-                "cross.setAttribute('y1',T);cross.setAttribute('y2',T+H);" +
+                "if(!(W>0)||!(H>0)||!(XT>XF)||!(YMAX0>YMIN0))return null;" +
+                // Per-chart state: current X domain + current Y scale + flags.
+                "var st={x0:XF,x1:XT,y0:YMIN0,y1:YMAX0,log:false,area:true,smooth:false};" +
+                // The empty server-emitted g.nw-dynamic (or create one as a fallback).
+                "var dyn=svg.querySelector('g.nw-dynamic');" +
+                "if(!dyn){dyn=mk('g',{'class':'nw-dynamic'});svg.appendChild(dyn);}" +
+                // Brush + crosshair overlay group, appended AFTER nw-dynamic so it is on top.
+                "var ov=mk('g',{'pointer-events':'none'});svg.appendChild(ov);" +
+                "var brush=mk('rect',{'class':'nw-brush','y':T,'height':H});brush.style.display='none';ov.appendChild(brush);" +
+                "var cross=mk('line',{'class':'nw-cross','y1':T,'y2':T+H});" +
+                "var ghost=mk('line',{'class':'nw-cross','y1':T,'y2':T+H});ghost.style.display='none';ov.appendChild(ghost);" +
                 "var dots=[];" +
-                "function clear(){ov.style.display='none';tip.classList.remove('nw-show');}" +
+                // Current-domain mappers (read live state so crosshair stays aligned).
+                "function ymap(v){if(st.log){var lo=Math.log10(Math.max(st.y0,1e-9)),hi=Math.log10(Math.max(st.y1,1e-9));" +
+                "if(!(hi>lo))hi=lo+1;return T+(1-(Math.log10(Math.max(v,1e-9))-lo)/(hi-lo))*H;}" +
+                "return T+(1-(v-st.y0)/((st.y1-st.y0)||1))*H;}" +
+                "function xmap(t){return L+(t-st.x0)/((st.x1-st.x0)||1)*W;}" +
+                "function tAt(px){return st.x0+(px-L)/W*(st.x1-st.x0);}" +
+                "if(!Math.log10)Math.log10=function(x){return Math.log(x)/Math.LN10;};" +
+                // Local->client px helpers via the live CTM (correct under width:100%).
+                "function toLocalX(clientX,clientY){var ctm=svg.getScreenCTM();if(!ctm)return null;" +
+                "var pt=svg.createSVGPoint();pt.x=clientX;pt.y=clientY;return pt.matrixTransform(ctm.inverse());}" +
                 "function ensureDots(n){while(dots.length<n){" +
-                "var d=document.createElementNS(SVGNS,'circle');d.setAttribute('class','nw-dot');" +
-                "d.setAttribute('r','3.4');d.setAttribute('stroke','#0b0e14');d.setAttribute('stroke-width','1.5');" +
+                "var d=mk('circle',{'class':'nw-dot','r':'3.4','stroke':'#0b0e14','stroke-width':'1.5'});" +
                 "ov.appendChild(d);dots.push(d);}}" +
-                "function move(ev){" +
-                "var ctm=svg.getScreenCTM();if(!ctm)return;" +
-                "var pt=svg.createSVGPoint();pt.x=ev.clientX;pt.y=ev.clientY;" +
-                "var lp=pt.matrixTransform(ctm.inverse());" +
-                // Clamp the crosshair to the plot area; derive cursor time from it.
-                "var px=lp.x;if(px<L)px=L;else if(px>L+W)px=L+W;" +
-                "var ct=XF+(px-L)/W*(XT-XF);" +
-                // Crosshair line.
-                "if(!cross.parentNode)ov.appendChild(cross);" +
+
+                // Samples of one series within the current domain, plus the immediate
+                // neighbours so the drawn line reaches both plot edges.
+                "function clip(arr){var a=arr,n=a.length,r=[];if(!n)return r;" +
+                "var i=0;for(;i<n;i++){if(a[i].t>=st.x0)break;}" +
+                "if(i>0)r.push(a[i-1]);" +
+                "for(;i<n;i++){r.push(a[i]);if(a[i].t>st.x1){break;}}" +
+                "return r;}" +
+
+                // Recompute the visible Y range from clipped samples of visible series.
+                "function autoY(){var lo=Infinity,hi=-Infinity,ser=visSeries(svg);" +
+                "for(var i=0;i<ser.length;i++){var c=clip(pts(ser[i]));" +
+                "for(var j=0;j<c.length;j++){var v=c[j].v;if(v<lo)lo=v;if(v>hi)hi=v;}}" +
+                "if(lo===Infinity){st.y0=YMIN0;st.y1=YMAX0;return;}" +
+                "if(st.log){if(lo<=0)lo=1e-9;}" +
+                "var pad=(hi-lo)*0.08;if(!(pad>0))pad=Math.abs(hi)>1e-9?Math.abs(hi)*0.1:1;" +
+                "st.y0=lo-pad;st.y1=hi+pad;if(YMIN0>=0&&st.y0<0)st.y0=0;" +
+                "if(st.log&&st.y0<=0)st.y0=Math.max(lo*0.5,1e-9);" +
+                "if(!(st.y1>st.y0))st.y1=st.y0+1;}" +
+
+                // SVG path 'd' for a clipped point list using current mappers.
+                "function lineD(c){var d='';for(var i=0;i<c.length;i++){var x=xmap(c[i].t),y=ymap(c[i].v);" +
+                "if(x<L)x=L;else if(x>L+W)x=L+W;d+=(i?'L':'M')+x.toFixed(2)+' '+y.toFixed(2);}return d;}" +
+                "function areaD(c){if(c.length<2)return '';var d='';var base=(T+H).toFixed(2);" +
+                "var x0=Math.min(Math.max(xmap(c[0].t),L),L+W);d+='M'+x0.toFixed(2)+' '+base;" +
+                "for(var i=0;i<c.length;i++){var x=xmap(c[i].t),y=ymap(c[i].v);" +
+                "if(x<L)x=L;else if(x>L+W)x=L+W;d+='L'+x.toFixed(2)+' '+y.toFixed(2);}" +
+                "var xl=Math.min(Math.max(xmap(c[c.length-1].t),L),L+W);" +
+                "d+='L'+xl.toFixed(2)+' '+base+'Z';return d;}" +
+                // Centred moving average (window ~ smoothing overlay) over clipped pts.
+                "function smoothD(c){if(c.length<3)return '';var w=Math.max(2,Math.round(c.length/12));" +
+                "var d='';for(var i=0;i<c.length;i++){var s=0,n=0;" +
+                "for(var k=-w;k<=w;k++){var j=i+k;if(j>=0&&j<c.length){s+=c[j].v;n++;}}" +
+                "var x=xmap(c[i].t),y=ymap(s/n);if(x<L)x=L;else if(x>L+W)x=L+W;" +
+                "d+=(i?'L':'M')+x.toFixed(2)+' '+y.toFixed(2);}return d;}" +
+
+                // Full extent? (whole data domain, linear Y) -> show static server SVG.
+                "function isFull(){return st.x0<=XF+0.5&&st.x1>=XT-0.5;}" +
+
+                // Rebuild g.nw-dynamic for the current domain/scale (zoomed view) or
+                // clear it and reveal the static server-rendered content at full extent.
+                "function redraw(){while(dyn.firstChild)dyn.removeChild(dyn.firstChild);" +
+                "var zoomed=!isFull()||st.log||st.smooth;" +
+                "if(!zoomed){svg.classList.remove('nw-zoomed');st.y0=YMIN0;st.y1=YMAX0;return;}" +
+                "svg.classList.add('nw-zoomed');autoY();" +
+                // Y gridlines + labels (nice ticks).
+                "var step=niceStep(st.y1-st.y0,4);var start=Math.ceil(st.y0/step)*step;" +
+                "for(var gv=start;gv<=st.y1+1e-9;gv+=step){var gy=ymap(gv);" +
+                "dyn.appendChild(mk('line',{'class':'nw-dyn-grid','x1':L,'y1':gy.toFixed(2),'x2':L+W,'y2':gy.toFixed(2)}));" +
+                "var tl=mk('text',{'class':'nw-dyn-txt','x':(L-8).toFixed(2),'y':(gy+3).toFixed(2),'text-anchor':'end'});" +
+                "tl.textContent=fmtAxis(gv)+(gv===start&&unit?' '+unit:'');dyn.appendChild(tl);}" +
+                // X labels (HH:mm or HH:mm:ss when span<15min).
+                "var span=st.x1-st.x0;var shortS=span<15*60000;" +
+                "for(var xi=0;xi<=5;xi++){var fr=xi/5;var xx=L+fr*W;var tt=st.x0+fr*span;" +
+                "var an=xi===0?'start':(xi===5?'end':'middle');" +
+                "var xt=mk('text',{'class':'nw-dyn-txt','x':xx.toFixed(2),'y':(T+H+16).toFixed(2),'text-anchor':an});" +
+                "xt.textContent=shortS?fmtTime(tt):fmtHM(tt);dyn.appendChild(xt);}" +
+                // One area + line (+ optional smoothing) per visible series.
+                "var ser=visSeries(svg);" +
+                "for(var i=0;i<ser.length;i++){var g=ser[i];var col=g.getAttribute('data-color')||'#38bdf8';" +
+                "var c=clip(pts(g));if(c.length<1)continue;" +
+                "if(st.area&&c.length>1){var ad=areaD(c);if(ad)dyn.appendChild(mk('path',{'class':'nw-dyn-area','d':ad,'fill':col,'opacity':'0.16'}));}" +
+                "var ld=lineD(c);if(ld)dyn.appendChild(mk('path',{'class':'nw-dyn-line','d':ld,'stroke':col}));" +
+                "if(st.smooth){var sd=smoothD(c);if(sd)dyn.appendChild(mk('path',{'class':'nw-smooth-line','d':sd,'stroke':col}));}}" +
+                "}" +
+                // Axis number format (compact, like the server FormatValue).
+                "function fmtAxis(v){var a=Math.abs(v);if(a>=1000){var k=v/1000;return (a>=100000?k.toFixed(0):k.toFixed(1))+'k';}" +
+                "if(a>=100)return v.toFixed(0);if(a>=10)return v.toFixed(1);return v.toFixed(2);}" +
+                "function fmtHM(ms){var d=new Date(ms);function p(n){return(n<10?'0':'')+n;}" +
+                "return p(d.getUTCHours())+':'+p(d.getUTCMinutes());}" +
+
+                // Crosshair + dots + tooltip at a cursor time, using the CURRENT scale.
+                // owner=true draws the full tooltip; owner=false is the synced ghost.
+                "function showAt(ct,clientX,clientY,owner){" +
+                "if(ct<st.x0||ct>st.x1){if(owner)hide();else{ghost.style.display='none';}return;}" +
+                "var px=xmap(ct);" +
+                "if(owner){if(!cross.parentNode)ov.appendChild(cross);cross.style.display='';" +
                 "cross.setAttribute('x1',px);cross.setAttribute('x2',px);" +
-                // Build tooltip rows + hover dots for every VISIBLE series.
-                "var ser=svg.querySelectorAll('g.nw-series');" +
-                "var rows='';var di=0;ensureDots(ser.length);" +
-                "for(var i=0;i<ser.length;i++){var g=ser[i];" +
-                "if(g.style.display==='none'){continue;}" +
-                "var col=g.getAttribute('data-color')||'#38bdf8';" +
-                "var lab=g.getAttribute('data-label')||'';" +
+                "var ser=visSeries(svg);var di=0;ensureDots(ser.length);" +
+                "for(var i=0;i<ser.length;i++){var g=ser[i];var col=g.getAttribute('data-color')||'#38bdf8';" +
                 "var np=nearest(pts(g),ct);" +
-                "var vtxt='—';" +
-                "if(np){vtxt=fmtVal(np.v,unit);" +
-                "var d=dots[di++];d.style.display='';d.setAttribute('fill',col);" +
-                "d.setAttribute('cx',xOf(np.t));d.setAttribute('cy',yOf(np.v));}" +
-                "rows+='<div class=\\\"nw-tip-row\\\"><span class=\\\"nw-sw\\\" style=\\\"background:'+col+'\\\"></span>'+" +
-                "'<span class=\\\"nw-lab\\\">'+esc(lab)+'</span><span class=\\\"nw-val\\\">'+esc(vtxt)+'</span></div>';}" +
-                // Hide any leftover dots beyond the visible-series count.
+                "if(np&&np.t>=st.x0-1&&np.t<=st.x1+1){var d=dots[di++];" +
+                "d.style.display='';d.setAttribute('fill',col);d.setAttribute('cx',xmap(np.t));d.setAttribute('cy',ymap(np.v));}}" +
                 "for(var k=di;k<dots.length;k++){dots[k].style.display='none';}" +
                 "ov.style.display='';" +
-                "tip.innerHTML='<div class=\\\"nw-tip-time\\\">'+esc(fmtTime(ct))+'</div>'+rows;" +
-                "tip.style.left=ev.clientX+'px';tip.style.top=(ev.clientY-14)+'px';" +
-                "tip.classList.add('nw-show');" +
-                "}" +
-                "svg.addEventListener('mousemove',move);" +
-                "svg.addEventListener('mouseleave',clear);" +
-                "clear();" +
-                "}" +
+                "tip.innerHTML='<div class=\\\"nw-tip-time\\\">'+esc(fmtTime(ct))+'</div>'+rows0(ct);" +
+                "tip.style.left=(clientX!=null?clientX:0)+'px';tip.style.top=((clientY!=null?clientY:0)-14)+'px';" +
+                "tip.classList.add('nw-show');}" +
+                "else{ghost.style.display='';ghost.setAttribute('x1',px);ghost.setAttribute('x2',px);ov.style.display='';}}" +
+                // Tooltip rows for visible series at time ct (current scale).
+                "function rows0(ct){var ser=visSeries(svg);var rows='';" +
+                "for(var i=0;i<ser.length;i++){var g=ser[i];var col=g.getAttribute('data-color')||'#38bdf8';" +
+                "var lab=g.getAttribute('data-label')||'';var np=nearest(pts(g),ct);var vtxt='—';" +
+                "if(np&&np.t>=st.x0-1&&np.t<=st.x1+1)vtxt=fmtVal(np.v,unit);" +
+                "rows+='<div class=\\\"nw-tip-row\\\"><span class=\\\"nw-sw\\\" style=\\\"background:'+col+'\\\"></span>'+" +
+                "'<span class=\\\"nw-lab\\\">'+esc(lab)+'</span><span class=\\\"nw-val\\\">'+esc(vtxt)+'</span></div>';}" +
+                "return rows;}" +
+                "function hide(){cross.style.display='none';for(var k=0;k<dots.length;k++)dots[k].style.display='none';" +
+                "tip.classList.remove('nw-show');}" +
+                "function hideGhost(){ghost.style.display='none';}" +
 
-                // Small HTML-escape for tooltip text built via innerHTML.
-                "function esc(s){s=''+s;return s.replace(/&/g,'&amp;').replace(/</g,'&lt;')" +
-                ".replace(/>/g,'&gt;').replace(/\"/g,'&quot;');}" +
+                // ----- pointer interactions: brush-zoom / wheel-zoom / pan / dblclick -----
+                "var drag=null;" + // {mode:'brush'|'pan',startX,startT,...}
+                "function onDown(ev){if(ev.button===1||ev.shiftKey){var lp=toLocalX(ev.clientX,ev.clientY);if(!lp)return;" +
+                "drag={mode:'pan',cx:ev.clientX,x0:st.x0,x1:st.x1};svg.classList.add('nw-panning');ev.preventDefault();return;}" +
+                "if(ev.button!==0)return;var lp=toLocalX(ev.clientX,ev.clientY);if(!lp)return;" +
+                "var px=Math.min(Math.max(lp.x,L),L+W);drag={mode:'brush',sx:px,cx:ev.clientX};}" +
+                "function onMove(ev){" +
+                "if(drag&&drag.mode==='pan'){var ctm=svg.getScreenCTM();if(ctm){" +
+                "var dpx=(ev.clientX-drag.cx)/ctm.a;var dt=-dpx/W*(drag.x1-drag.x0);" +
+                "var nx0=drag.x0+dt,nx1=drag.x1+dt,wsp=drag.x1-drag.x0;" +
+                "if(nx0<XF){nx0=XF;nx1=XF+wsp;}if(nx1>XT){nx1=XT;nx0=XT-wsp;}" +
+                "st.x0=nx0;st.x1=nx1;redraw();sync(null);}hide();return;}" +
+                "if(drag&&drag.mode==='brush'){var lp=toLocalX(ev.clientX,ev.clientY);if(!lp)return;" +
+                "var px=Math.min(Math.max(lp.x,L),L+W);var a=Math.min(drag.sx,px),b=Math.max(drag.sx,px);" +
+                "brush.style.display='';brush.setAttribute('x',a);brush.setAttribute('width',Math.max(0,b-a));ov.style.display='';hide();return;}" +
+                // No drag: crosshair + synced ghosts on other charts. onMove is a window
+                // listener (so a drag keeps tracking outside the svg), so gate the hover on the
+                // pointer actually being over THIS svg — otherwise every chart sharing this X
+                // column would also become owner and overwrite the shared tooltip.
+                "var rb=svg.getBoundingClientRect();" +
+                "if(ev.clientX<rb.left||ev.clientX>rb.right||ev.clientY<rb.top||ev.clientY>rb.bottom)return;" +
+                "var lp=toLocalX(ev.clientX,ev.clientY);if(!lp)return;" +
+                "var px=Math.min(Math.max(lp.x,L),L+W);var ct=tAt(px);" +
+                "showAt(ct,ev.clientX,ev.clientY,true);sync(ct);}" +
+                "function onUp(ev){svg.classList.remove('nw-panning');" +
+                "if(drag&&drag.mode==='brush'){brush.style.display='none';" +
+                "var lp=toLocalX(ev.clientX,ev.clientY);" +
+                "if(lp){var px=Math.min(Math.max(lp.x,L),L+W);" +
+                "if(Math.abs(px-drag.sx)>=6){var a=Math.min(drag.sx,px),b=Math.max(drag.sx,px);" +
+                "var t0=tAt(a),t1=tAt(b);if(t1>t0){st.x0=t0;st.x1=t1;redraw();sync(null);}}}}" +
+                "drag=null;}" +
+                "function onWheel(ev){ev.preventDefault();var lp=toLocalX(ev.clientX,ev.clientY);if(!lp)return;" +
+                "var px=Math.min(Math.max(lp.x,L),L+W);var ct=tAt(px);" +
+                "var f=ev.deltaY<0?0.8:1.25;var nw=(st.x1-st.x0)*f;" +
+                "var minw=Math.min(2000,(XT-XF));if(nw<minw)nw=minw;if(nw>(XT-XF))nw=XT-XF;" +
+                "var left=ct-(ct-st.x0)*(nw/(st.x1-st.x0||1));var right=left+nw;" +
+                "if(left<XF){left=XF;right=XF+nw;}if(right>XT){right=XT;left=XT-nw;}" +
+                "st.x0=left;st.x1=right;redraw();showAt(ct,ev.clientX,ev.clientY,true);sync(ct);}" +
+                "function reset(){st.x0=XF;st.x1=XT;st.log=false;st.smooth=false;st.area=true;" +
+                "svg.classList.remove('nw-noarea');redraw();" +
+                "svg.classList.remove('nw-zoomed');sync(null);}" +
+                "svg.addEventListener('mousedown',onDown);" +
+                "window.addEventListener('mousemove',onMove);" +
+                "window.addEventListener('mouseup',onUp);" +
+                "svg.addEventListener('wheel',onWheel,{passive:false});" +
+                "svg.addEventListener('dblclick',function(e){e.preventDefault();reset();});" +
+                "svg.addEventListener('mouseleave',function(){if(!drag){hide();syncClear();}});" +
+                "svg.addEventListener('contextmenu',function(e){if(drag)e.preventDefault();});" +
+
+                // Controller object exposed for toolbar / keyboard / synced crosshair.
+                "var ctrl={svg:svg,st:st,redraw:redraw,reset:reset," +
+                "ghost:function(ct){if(ct==null){hideGhost();return;}showAt(ct,null,null,false);}," +
+                "hideAll:function(){hide();hideGhost();}," +
+                "panBy:function(frac){var sp=st.x1-st.x0;var dt=sp*frac;var nx0=st.x0+dt,nx1=st.x1+dt;" +
+                "if(nx0<XF){nx0=XF;nx1=XF+sp;}if(nx1>XT){nx1=XT;nx0=XT-sp;}st.x0=nx0;st.x1=nx1;redraw();}," +
+                "zoomBy:function(f){var ct=(st.x0+st.x1)/2;var nw=(st.x1-st.x0)*f;var mw=Math.min(2000,XT-XF);" +
+                "if(nw<mw)nw=mw;if(nw>XT-XF)nw=XT-XF;var l=ct-nw/2,r=ct+nw/2;" +
+                "if(l<XF){l=XF;r=XF+nw;}if(r>XT){r=XT;l=XT-nw;}st.x0=l;st.x1=r;redraw();}," +
+                "setLog:function(on){st.log=on;redraw();}," +
+                "setArea:function(on){st.area=on;svg.classList.toggle('nw-noarea',!on);redraw();}," +
+                "setSmooth:function(on){st.smooth=on;redraw();}," +
+                "isFull:isFull,XF:XF,XT:XT};" +
+                "svg._nwc=ctrl;CHARTS.push(ctrl);redraw();return ctrl;}" +
+
+                // ---------- synced crosshair across all charts (by time) ----------
+                // Show a ghost crosshair at time ct on every OTHER chart that covers it.
+                "function sync(ct){for(var i=0;i<CHARTS.length;i++){var c=CHARTS[i];" +
+                "if(ct==null){c.ghost(null);continue;}" +
+                "if(c.st===undefined)continue;" +
+                "if(ct>=c.st.x0&&ct<=c.st.x1)c.ghost(ct);else c.ghost(null);}}" +
+                "function syncClear(){for(var i=0;i<CHARTS.length;i++){CHARTS[i].ghost(null);}}" +
+                // Make sync skip the owning chart's own ghost when its real crosshair is up:
+                // showAt(owner) already drew the real crosshair, and ghost()/showAt(false)
+                // for the same chart just overlaps harmlessly (same x), so no special case.
 
                 // Wire every chart on the page.
                 "var charts=document.querySelectorAll('svg.nw-chart');" +
@@ -921,9 +1145,12 @@ namespace NetWatch.Report
                 "for(var i=0;i<legs.length;i++){(function(li){" +
                 "var label=li.getAttribute('data-nw-toggle');var card=cardOf(li);" +
                 // Click toggles this series' visibility across every chart in this card.
+                // Also re-run any zoomed chart's redraw so its dynamic layer reflects it.
                 "function toggle(){var off=li.classList.toggle('nw-off');" +
                 "var gs=seriesIn(card,label);" +
-                "for(var j=0;j<gs.length;j++){gs[j].style.display=off?'none':'';}}" +
+                "for(var j=0;j<gs.length;j++){gs[j].style.display=off?'none':'';}" +
+                "var cs=card.querySelectorAll('svg.nw-chart');" +
+                "for(var s=0;s<cs.length;s++){if(cs[s]._nwc)cs[s]._nwc.redraw();}}" +
                 "li.addEventListener('click',toggle);" +
                 "li.addEventListener('keydown',function(e){if(e.key==='Enter'||e.key===' '){e.preventDefault();toggle();}});" +
                 // Hover emphasises this series and fades the others within the card.
@@ -937,6 +1164,134 @@ namespace NetWatch.Report
                 "var gs=card.querySelectorAll('g.nw-series.nw-hot');" +
                 "for(var j=0;j<gs.length;j++){gs[j].classList.remove('nw-hot');}});" +
                 "})(legs[i]);}" +
+
+                // ---------- which chart is currently active in a card (by range) ----------
+                // Only one of the 3 stacked wells (c5m/c60m/c24h) is visible at a time.
+                "function activeSvg(card){var ws=card.querySelectorAll('.chart');" +
+                "for(var i=0;i<ws.length;i++){if(ws[i].offsetParent!==null){var s=ws[i].querySelector('svg.nw-chart');if(s)return s;}}" +
+                "var any=card.querySelector('svg.nw-chart');return any;}" +
+
+                // ---------- PNG export: rasterise the active chart's current SVG view ----------
+                "function downloadDataUrl(url,name){var a=document.createElement('a');a.href=url;a.download=name;" +
+                "document.body.appendChild(a);a.click();document.body.removeChild(a);}" +
+                "function exportPNG(card){var svg=activeSvg(card);if(!svg)return;" +
+                "var vb=svg.getAttribute('viewBox').split(/\\s+/);var w=parseFloat(vb[2])||860,h=parseFloat(vb[3])||320;" +
+                "var clone=svg.cloneNode(true);clone.setAttribute('width',w);clone.setAttribute('height',h);" +
+                // Strip the transient overlay (crosshair/brush) so the export is clean.
+                "var ovs=clone.querySelectorAll('.nw-cross,.nw-brush,.nw-dot');for(var i=0;i<ovs.length;i++)ovs[i].parentNode&&ovs[i].parentNode.removeChild(ovs[i]);" +
+                "clone.style.background='#11161f';" +
+                // Inline the chart CSS into the standalone clone so a rasterised SVG matches
+                // the on-screen view: dynamic line/grid/label/area styling, the zoomed-state
+                // rule that hides the static server layer, and the area-off rule. Without this
+                // a zoomed export would show black-filled blobs + the reappearing static layer.
+                "var ec='.nw-dyn-line,.nw-smooth-line{fill:none;stroke-linejoin:round;stroke-linecap:round}'+" +
+                "'.nw-dyn-line{stroke-width:1.75}.nw-smooth-line{stroke-width:1.4;stroke-dasharray:5 3;opacity:.85}'+" +
+                "'.nw-dyn-grid{stroke:#1f2733;stroke-width:1}.nw-dyn-txt{fill:#94a3b8;font-size:10px}.nw-dyn-area{stroke:none}'+" +
+                "'.nw-chart.nw-zoomed .nw-xaxis,.nw-chart.nw-zoomed .nw-yaxis,.nw-chart.nw-zoomed .nw-grid,.nw-chart.nw-zoomed .nw-series{display:none}'+" +
+                "'.nw-chart.nw-noarea .nw-dyn-area{display:none}';" +
+                "var stl=document.createElementNS(SVGNS,'style');stl.textContent=ec;clone.insertBefore(stl,clone.firstChild);" +
+                // When area is toggled off, also drop the static gradient-filled area paths from
+                // the clone (the on-page rule that hides them is a CSS attribute selector we omit).
+                "if(svg.classList.contains('nw-noarea')){var aps=clone.querySelectorAll('.nw-series path');" +
+                "for(var j=0;j<aps.length;j++){var ff=aps[j].getAttribute('fill');" +
+                "if(ff&&ff.indexOf('url(')===0&&aps[j].parentNode)aps[j].parentNode.removeChild(aps[j]);}}" +
+                "var xml=new XMLSerializer().serializeToString(clone);" +
+                "var src='data:image/svg+xml;base64,'+btoa(unescape(encodeURIComponent(xml)));" +
+                "var img=new Image();var scale=2;" +
+                "img.onload=function(){var cv=document.createElement('canvas');cv.width=w*scale;cv.height=h*scale;" +
+                "var cx=cv.getContext('2d');cx.fillStyle='#11161f';cx.fillRect(0,0,cv.width,cv.height);" +
+                "cx.scale(scale,scale);cx.drawImage(img,0,0,w,h);" +
+                "try{downloadDataUrl(cv.toDataURL('image/png'),fname(card,'png'));}catch(e){}};" +
+                "img.onerror=function(){};img.src=src;}" +
+
+                // ---------- CSV export: visible series within the current domain ----------
+                "function exportCSV(card){var svg=activeSvg(card);if(!svg)return;var c=svg._nwc;" +
+                "var x0=c?c.st.x0:parseFloat(svg.getAttribute('data-xfrom'));" +
+                "var x1=c?c.st.x1:parseFloat(svg.getAttribute('data-xto'));" +
+                "var ser=visSeries(svg);if(!ser.length)return;" +
+                // Union of all sample times (in-domain), sorted, then one column per series.
+                "var labels=[],maps=[];for(var i=0;i<ser.length;i++){labels.push(ser[i].getAttribute('data-label')||('s'+i));" +
+                "var m={};var p=pts(ser[i]);for(var j=0;j<p.length;j++){if(p[j].t>=x0&&p[j].t<=x1)m[p[j].t]=p[j].v;}maps.push(m);}" +
+                "var tset={};for(var i=0;i<maps.length;i++)for(var t in maps[i])if(maps[i].hasOwnProperty(t))tset[t]=1;" +
+                "var times=[];for(var t in tset)if(tset.hasOwnProperty(t))times.push(parseFloat(t));times.sort(function(a,b){return a-b;});" +
+                "var out='time';for(var i=0;i<labels.length;i++)out+=','+csvCell(labels[i]);out+='\\n';" +
+                "for(var r=0;r<times.length;r++){out+=fmtTime(times[r]);" +
+                "for(var i=0;i<maps.length;i++){var v=maps[i][times[r]];out+=','+(v===undefined?'':v);}out+='\\n';}" +
+                "var url='data:text/csv;charset=utf-8,'+encodeURIComponent(out);downloadDataUrl(url,fname(card,'csv'));}" +
+                "function csvCell(s){s=''+s;if(/[\",\\n]/.test(s))s='\"'+s.replace(/\"/g,'\"\"')+'\"';return s;}" +
+                // Build \"<metric>-<range>.<ext>\" filename from card data + active range.
+                "function fname(card,ext){var m=(card.getAttribute('data-metric')||'chart').toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/^-|-$/g,'');" +
+                "var r=ranged?(ranged.className.replace('grid','').replace('range-','').trim()||'60m'):'60m';" +
+                "return m+'-'+r+'.'+ext;}" +
+
+                // ---------- fullscreen overlay (offline-safe; CSS class, not the FS API) ----------
+                "var fsBackdrop=null,fsCard=null;" +
+                "function openFS(card){closeFS();fsBackdrop=document.createElement('div');fsBackdrop.className='nw-fs-backdrop';" +
+                "fsBackdrop.addEventListener('click',closeFS);document.body.appendChild(fsBackdrop);" +
+                "card.classList.add('nw-fs');document.body.classList.add('nw-fs-open');fsCard=card;}" +
+                "function closeFS(){if(fsCard){fsCard.classList.remove('nw-fs');fsCard=null;}" +
+                "if(fsBackdrop){fsBackdrop.parentNode&&fsBackdrop.parentNode.removeChild(fsBackdrop);fsBackdrop=null;}" +
+                "document.body.classList.remove('nw-fs-open');}" +
+                "document.addEventListener('keydown',function(e){if(e.key==='Escape')closeFS();});" +
+
+                // ---------- per-chart toolbar dispatch ----------
+                "function cardCtrls(card){var cs=card.querySelectorAll('svg.nw-chart');var r=[];" +
+                "for(var i=0;i<cs.length;i++){if(cs[i]._nwc)r.push(cs[i]._nwc);}return r;}" +
+                "var tbs=document.querySelectorAll('.nw-tb');" +
+                "for(var i=0;i<tbs.length;i++){(function(b){" +
+                "var card=cardOf(b);var act=b.getAttribute('data-act');" +
+                // Reflect default latched state: area on.
+                "if(act==='area')b.classList.add('nw-on');" +
+                "b.addEventListener('click',function(){" +
+                "if(act==='reset'){var cc=cardCtrls(card);for(var j=0;j<cc.length;j++)cc[j].reset();" +
+                "var ab=card.querySelector('.nw-tb-area');if(ab)ab.classList.add('nw-on');" +
+                "var sb=card.querySelector('.nw-tb-smooth');if(sb)sb.classList.remove('nw-on');" +
+                "var lb=card.querySelector('.nw-tb-log');if(lb)lb.classList.remove('nw-on');}" +
+                "else if(act==='png'){exportPNG(card);}" +
+                "else if(act==='csv'){exportCSV(card);}" +
+                "else if(act==='full'){if(card.classList.contains('nw-fs'))closeFS();else openFS(card);}" +
+                "else if(act==='area'){var on=!b.classList.contains('nw-on');b.classList.toggle('nw-on',on);" +
+                "var cc=cardCtrls(card);for(var j=0;j<cc.length;j++)cc[j].setArea(on);}" +
+                "else if(act==='smooth'){var on=!b.classList.contains('nw-on');b.classList.toggle('nw-on',on);" +
+                "var cc=cardCtrls(card);for(var j=0;j<cc.length;j++)cc[j].setSmooth(on);}" +
+                "else if(act==='log'){var on=!b.classList.contains('nw-on');b.classList.toggle('nw-on',on);" +
+                "var cc=cardCtrls(card);for(var j=0;j<cc.length;j++)cc[j].setLog(on);}" +
+                "});})(tbs[i]);}" +
+
+                // ---------- keyboard nav on a focused chart (tabindex=0) ----------
+                // Make the active well focusable; Left/Right pan, +/- zoom, 0 resets.
+                "var wraps=document.querySelectorAll('.svgwrap');" +
+                "for(var i=0;i<wraps.length;i++){(function(wrap){" +
+                "wrap.setAttribute('tabindex','0');" +
+                "wrap.addEventListener('keydown',function(e){var svg=wrap.querySelector('svg.nw-chart');" +
+                "if(!svg||!svg._nwc)return;var c=svg._nwc;var k=e.key;" +
+                "if(k==='ArrowLeft'){c.panBy(-0.2);e.preventDefault();}" +
+                "else if(k==='ArrowRight'){c.panBy(0.2);e.preventDefault();}" +
+                "else if(k==='+'||k==='='){c.zoomBy(0.8);e.preventDefault();}" +
+                "else if(k==='-'||k==='_'){c.zoomBy(1.25);e.preventDefault();}" +
+                "else if(k==='0'){c.reset();e.preventDefault();}" +
+                "});})(wraps[i]);}" +
+
+                // ---------- pause auto-refresh + 'updated <ago>' hint ----------
+                "var RKEY='netwatch.paused';var gen=parseFloat(document.body.getAttribute('data-gen'))||0;" +
+                "var rbtn=document.getElementById('nw-refresh');var rupd=document.getElementById('nw-updated');" +
+                "var reloadTimer=null;var paused=false;" +
+                "try{paused=localStorage.getItem(RKEY)==='1';}catch(e){}" +
+                "function scheduleReload(){if(reloadTimer){clearTimeout(reloadTimer);reloadTimer=null;}" +
+                "if(!paused){reloadTimer=setTimeout(function(){location.reload();},60000);}}" +
+                // Age from the encoded wall-clock: now-as-wall-clock (epoch-ms minus the
+                // local TZ offset, matching the server's no-offset encoding) minus gen.
+                "function agoTxt(){if(!gen)return '';" +
+                "var nowWall=Date.now()-new Date().getTimezoneOffset()*60000;" +
+                "var s=Math.max(0,Math.round((nowWall-gen)/1000));" +
+                "if(s<60)return 'updated '+s+'s ago';var m=Math.round(s/60);return 'updated '+m+'m ago';}" +
+                "function paintRefresh(){if(rbtn){rbtn.classList.toggle('nw-paused',paused);" +
+                "rbtn.setAttribute('aria-pressed',paused?'true':'false');" +
+                "var tx=rbtn.querySelector('.nw-refresh-txt');if(tx)tx.textContent=paused?'paused':'auto-refresh 60s';}" +
+                "if(rupd)rupd.textContent=agoTxt();}" +
+                "if(rbtn){rbtn.addEventListener('click',function(){paused=!paused;" +
+                "try{localStorage.setItem(RKEY,paused?'1':'0');}catch(e){}paintRefresh();scheduleReload();});}" +
+                "paintRefresh();scheduleReload();setInterval(paintRefresh,5000);" +
 
                 "})();";
         }
@@ -1073,6 +1428,73 @@ namespace NetWatch.Report
             c.Append(".nw-tip .nw-tip-row .nw-lab{color:" + MutedColor + "}");
             c.Append(".nw-tip .nw-tip-row .nw-val{margin-left:auto;font-weight:600;" +
                 "font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}");
+
+            // ---- per-chart toolbar (top-right; appears/solidifies on hover) ----
+            c.Append(".metric{position:relative}");
+            c.Append(".card-head{position:relative}");
+            c.Append(".nw-tools{position:absolute;top:0;right:0;display:flex;gap:4px;" +
+                "opacity:0;transform:translateY(-2px);transition:opacity .14s,transform .14s;" +
+                "z-index:6}");
+            c.Append(".metric:hover .nw-tools,.metric:focus-within .nw-tools{opacity:1;transform:none}");
+            c.Append(".nw-tb{appearance:none;cursor:pointer;font:inherit;font-size:12px;line-height:1;" +
+                "min-width:26px;height:26px;padding:0 6px;display:inline-flex;align-items:center;" +
+                "justify-content:center;color:" + MutedColor + ";background:#0e131c;" +
+                "border:1px solid " + PanelBorder + ";border-radius:7px;" +
+                "transition:background .12s,color .12s,border-color .12s}");
+            c.Append(".nw-tb:hover{color:" + TextColor + ";background:#172030;border-color:#2c3849}");
+            c.Append(".nw-tb:focus-visible{outline:2px solid " + AccentCyan + ";outline-offset:1px}");
+            c.Append(".nw-tb-csv,.nw-tb-log{font-size:10px;font-weight:700;letter-spacing:.03em}");
+            // Active (latched) toggles: area on by default, smoothing/log off.
+            c.Append(".nw-tb.nw-on{color:#06121d;background:" + AccentCyan + ";border-color:" + AccentCyan + "}");
+
+            // ---- brush selection band (drag-to-zoom) ----
+            c.Append(".nw-brush{fill:rgba(56,189,248,.16);stroke:rgba(56,189,248,.6);" +
+                "stroke-width:1;pointer-events:none}");
+            // Plot cursor affordances while interacting.
+            c.Append(".nw-chart{cursor:crosshair}");
+            c.Append(".nw-chart.nw-panning{cursor:grabbing}");
+
+            // ---- dynamic (zoomed) redraw layer ----
+            // The JS draws zoomed lines/areas/axes here; keep it above the static series
+            // but below the crosshair overlay (which the JS appends afterwards).
+            c.Append(".nw-dynamic{pointer-events:none}");
+            c.Append(".nw-dyn-line{fill:none;stroke-width:1.75;stroke-linejoin:round;stroke-linecap:round}");
+            c.Append(".nw-dyn-grid{stroke:" + "#1f2733" + ";stroke-width:1}");
+            c.Append(".nw-dyn-txt{fill:" + MutedColor + ";font-size:10px}");
+            // When a chart is zoomed, the server-static axes/grid/series are hidden by JS
+            // via this class so only the dynamic layer shows.
+            c.Append(".nw-chart.nw-zoomed .nw-xaxis,.nw-chart.nw-zoomed .nw-yaxis," +
+                ".nw-chart.nw-zoomed .nw-grid,.nw-chart.nw-zoomed .nw-series{display:none}");
+            // Area-fill toggle: hide gradient area paths (kept the stroke line) when off.
+            c.Append(".nw-chart.nw-noarea .nw-series path[fill^=\"url(\"],");
+            c.Append(".nw-chart.nw-noarea .nw-dyn-area{display:none}");
+            c.Append(".nw-dyn-area{stroke:none}");
+            // Smoothing overlay line (dashed, slightly transparent).
+            c.Append(".nw-smooth-line{fill:none;stroke-width:1.4;stroke-dasharray:5 3;opacity:.85;" +
+                "stroke-linejoin:round;stroke-linecap:round;pointer-events:none}");
+
+            // ---- focus ring on a focused chart (keyboard nav target) ----
+            c.Append(".chart:focus-within{outline:none}");
+            c.Append(".svgwrap:focus-visible,.nw-chart:focus-visible{outline:2px solid " + AccentCyan + ";" +
+                "outline-offset:2px;border-radius:8px}");
+
+            // ---- pause auto-refresh pill (button variant of .pill) ----
+            c.Append(".nw-refresh{appearance:none;cursor:pointer;font:inherit}");
+            c.Append(".nw-refresh:focus-visible{outline:2px solid " + AccentGreen + ";outline-offset:2px}");
+            // Paused state: amber treatment + halted pulse.
+            c.Append(".pill.nw-paused{color:" + AccentAmber + ";background:rgba(251,191,36,.10);" +
+                "border-color:rgba(251,191,36,.30)}");
+            c.Append(".pill.nw-paused .pulse{background:" + AccentAmber + ";animation:none;box-shadow:none}");
+            c.Append(".nw-updated{font-size:11px;color:" + MutedColor + ";white-space:nowrap;" +
+                "align-self:center}");
+
+            // ---- fullscreen overlay (pure CSS/JS, offline-safe; not the FS API) ----
+            c.Append(".nw-fs-backdrop{position:fixed;inset:0;z-index:200;background:rgba(5,8,13,.86);" +
+                "backdrop-filter:blur(3px);-webkit-backdrop-filter:blur(3px)}");
+            c.Append(".metric.nw-fs{position:fixed;inset:18px;z-index:201;margin:0;overflow:auto;" +
+                "display:flex;flex-direction:column;box-shadow:0 24px 80px rgba(0,0,0,.7)}");
+            c.Append(".metric.nw-fs .chart-stack{flex:1 1 auto;display:flex;flex-direction:column;justify-content:center}");
+            c.Append("body.nw-fs-open{overflow:hidden}");
 
             // footer stats
             c.Append(".foot-stack{margin-top:10px}");
