@@ -1,5 +1,6 @@
 using System;
 using System.Globalization;
+using System.Runtime.InteropServices;
 using System.Text;
 
 namespace NetWatch
@@ -14,10 +15,48 @@ namespace NetWatch
         private const string Repo = BuildInfo.Repo;
         private const string Author = BuildInfo.Author;
 
+        private const int STD_OUTPUT_HANDLE = -11;
+        private const uint ENABLE_WRAP_AT_EOL_OUTPUT = 0x0002;
+        [DllImport("kernel32.dll", SetLastError = true)] private static extern IntPtr GetStdHandle(int nStdHandle);
+        [DllImport("kernel32.dll", SetLastError = true)] private static extern bool GetConsoleMode(IntPtr h, out uint mode);
+        [DllImport("kernel32.dll", SetLastError = true)] private static extern bool SetConsoleMode(IntPtr h, uint mode);
+
+        private static IntPtr _stdOut = IntPtr.Zero;
+        private static uint _origMode;
+        private static bool _wrapDisabled;
+
         public static void Init()
         {
             try { Console.OutputEncoding = Encoding.UTF8; } catch { }
             try { Console.CursorVisible = false; } catch { }
+
+            // Disable console line-wrap: a line wider than the window then clips at the
+            // right edge instead of wrapping and scrolling the buffer (which would shift
+            // every row and shatter the in-place SetCursorPosition(0,0) redraw). Restore
+            // the original mode on exit so the user's shell behaves normally afterwards.
+            try
+            {
+                _stdOut = GetStdHandle(STD_OUTPUT_HANDLE);
+                if (_stdOut != IntPtr.Zero && _stdOut != new IntPtr(-1) &&
+                    GetConsoleMode(_stdOut, out _origMode) &&
+                    (_origMode & ENABLE_WRAP_AT_EOL_OUTPUT) != 0)
+                {
+                    if (SetConsoleMode(_stdOut, _origMode & ~ENABLE_WRAP_AT_EOL_OUTPUT))
+                    {
+                        _wrapDisabled = true;
+                        AppDomain.CurrentDomain.ProcessExit += (s, e) => RestoreConsole();
+                    }
+                }
+            }
+            catch { }
+        }
+
+        /// <summary>Restores the console output mode (line-wrap) changed by <see cref="Init"/>.</summary>
+        public static void RestoreConsole()
+        {
+            if (!_wrapDisabled) return;
+            try { SetConsoleMode(_stdOut, _origMode); } catch { }
+            _wrapDisabled = false;
         }
 
         public static bool Available
@@ -433,7 +472,7 @@ namespace NetWatch
             int inner = Math.Max(0, Math.Min(66, width - 2));
             int cw = Math.Max(0, inner - 2);
 
-            outp.Add(new Line(TitledBorder('╭', '╮', " TRACE / EVENTS ", inner), ConsoleColor.DarkCyan));
+            outp.Add(new Line(TitledBorder('╭', '╮', " TRACE / ALERTS ", inner), ConsoleColor.DarkCyan));
 
             var t = snap.LastTrace;
             string status = "—";
@@ -455,16 +494,30 @@ namespace NetWatch
             var ev = snap.RecentEvents ?? new string[0];
             if (ev.Length == 0)
             {
-                outp.Add(new Line(Card("events  (none)", cw), ConsoleColor.DarkGray));
+                outp.Add(new Line(Card("no alerts", cw), ConsoleColor.DarkGray));
             }
             else
             {
                 int start = Math.Max(0, ev.Length - 3); // newest 3, never wrap the card
                 for (int i = start; i < ev.Length; i++)
-                    outp.Add(new Line(Card("• " + ev[i], cw), ConsoleColor.DarkGray));
+                    outp.Add(new Line(Card("! " + ev[i], cw), AlertColor(ev[i])));
             }
 
             outp.Add(new Line(TitledBorder('╰', '╯', " " + status + " ", inner), ConsoleColor.DarkCyan));
+        }
+
+        // Colour an alert line by severity inferred from its text.
+        private static ConsoleColor AlertColor(string s)
+        {
+            if (string.IsNullOrEmpty(s)) return ConsoleColor.DarkGray;
+            string t = s.ToLowerInvariant();
+            if (t.Contains("unreachable") || t.Contains("packet loss") || t.Contains("disconnected"))
+                return ConsoleColor.Red;
+            if (t.Contains("weak") || t.Contains("high") || t.Contains("changed") || t.Contains("switch"))
+                return ConsoleColor.Yellow;
+            if (t.Contains("recovered") || t.Contains("connected"))
+                return ConsoleColor.Green;
+            return ConsoleColor.Gray;
         }
 
         // ---- rendering helpers ----
