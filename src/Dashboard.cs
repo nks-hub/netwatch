@@ -106,10 +106,10 @@ namespace NetWatch
                            up.Minutes.ToString("00", CultureInfo.InvariantCulture) + ":" +
                            up.Seconds.ToString("00", CultureInfo.InvariantCulture);
             string now = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture);
-            int inner = Math.Min(64, Math.Max(40, width - 2));
+            int inner = Math.Min(66, Math.Max(40, width - 2));
             outp.Add(new Line("╭" + new string('─', inner) + "╮", ConsoleColor.DarkCyan));
             outp.Add(new Line("│ " + Fit("NetWatch v1.0    network & VPN latency diagnostics", inner - 2) + " │", ConsoleColor.Cyan));
-            outp.Add(new Line("│ " + Fit("by " + Author + "   ·   github.com/nks-hub/netwatch", inner - 2) + " │", ConsoleColor.DarkGray));
+            outp.Add(new Line("│ " + Fit("by " + Author + "  ·  " + Repo, inner - 2) + " │", ConsoleColor.DarkGray));
             outp.Add(new Line("╰" + new string('─', inner) + "╯", ConsoleColor.DarkCyan));
             outp.Add(new Line(" up " + upStr + "    " + now + "    log: " + (cfg.LogDir ?? "logs"), def));
             outp.Add(new Line("", def));
