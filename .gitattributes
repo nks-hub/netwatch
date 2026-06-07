@@ -1,0 +1,31 @@
+# Normalise line endings: auto-detect text, CRLF for Windows sources, LF for configs/docs, binary for assets.
+* text=auto
+
+# Windows-centric sources: CRLF on checkout
+*.cs       text eol=crlf
+*.csproj   text eol=crlf
+*.ps1      text eol=crlf
+*.config   text eol=crlf
+*.bat      text eol=crlf
+*.cmd      text eol=crlf
+*.sln      text eol=crlf
+
+# Configs and docs: LF on checkout
+*.md            text eol=lf
+*.yml           text eol=lf
+*.yaml          text eol=lf
+.gitignore      text eol=lf
+.gitattributes  text eol=lf
+*.conf          text eol=lf
+*.sh            text eol=lf
+
+# Binary assets: never normalise or diff
+*.exe   binary
+*.dll   binary
+*.pdb   binary
+*.png   binary
+*.jpg   binary
+*.jpeg  binary
+*.gif   binary
+*.ico   binary
+*.zip   binary

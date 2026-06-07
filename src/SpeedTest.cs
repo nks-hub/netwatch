@@ -39,6 +39,12 @@ namespace NetWatch
         private const int PhaseWaitGraceMs = 1_000;         // small WaitAll grace over the phase cap
         private const int ReadBufferSize = 81_920;
 
+        // Ookla fallback (used only when Cloudflare cannot measure a direction).
+        private const string OoklaServersUrl =
+            "https://www.speedtest.net/api/js/servers?engine=js&limit=8&https_functional=true";
+        private const int OoklaDiscoveryTimeoutMs = 8_000;
+        private const long OoklaDownloadBytes = 25_000_000;
+
         /// <summary>Runs latency, download and upload measurements in sequence. Never throws.</summary>
         public static SpeedResult Run()
         {
@@ -98,6 +104,12 @@ namespace NetWatch
             catch (Exception ex)
             {
                 AppendError(result, "up: " + Short(ex));
+            }
+
+            if (result.DownMbps <= 0 || result.UpMbps <= 0)
+            {
+                try { OoklaFallback(result); }
+                catch (Exception ex) { AppendError(result, "ookla: " + Short(ex)); }
             }
 
             return result;
@@ -391,6 +403,239 @@ namespace NetWatch
             return sent;
         }
 
+        /// <summary>
+        /// Best-effort fallback against the nearest Ookla Speedtest server, used
+        /// only to fill a direction Cloudflare could not measure (HTTP 429, blocked,
+        /// unreachable). Discovers nearby servers, then measures download/upload via
+        /// their plain-HTTP test endpoints. Never throws.
+        /// </summary>
+        private static void OoklaFallback(SpeedResult result)
+        {
+            bool needDown = result.DownMbps <= 0;
+            bool needUp = result.UpMbps <= 0;
+            if (!needDown && !needUp) return;
+
+            string name;
+            var hosts = DiscoverOoklaHosts(out name);
+            if (hosts.Count == 0)
+            {
+                AppendError(result, "ookla: no servers");
+                return;
+            }
+
+            string workingHost = null;
+
+            // Download: try each candidate until one yields bytes; remember it.
+            if (needDown)
+            {
+                foreach (var host in hosts)
+                {
+                    string err;
+                    var deadline = DateTime.UtcNow.AddMilliseconds(DownPhaseCapMs);
+                    var sw = Stopwatch.StartNew();
+                    long bytes = OoklaDownload(host, deadline, out err);
+                    sw.Stop();
+                    double seconds = sw.Elapsed.TotalSeconds;
+                    if (bytes > 0 && seconds > 0.0001)
+                    {
+                        result.DownMbps = bytes * 8.0 / seconds / 1e6;
+                        ClearError(result, "down:");
+                        workingHost = host;
+                        break;
+                    }
+                }
+                if (result.DownMbps <= 0)
+                    AppendError(result, "ookla down: no data");
+            }
+
+            // Upload: reuse the working download host, else probe candidates for one.
+            if (needUp)
+            {
+                if (workingHost == null)
+                {
+                    // Find a reachable host with a tiny download so upload has a target.
+                    foreach (var host in hosts)
+                    {
+                        string perr;
+                        var pdeadline = DateTime.UtcNow.AddMilliseconds(DownPhaseCapMs);
+                        long probe = OoklaDownload(host, pdeadline, out perr);
+                        if (probe > 0) { workingHost = host; break; }
+                    }
+                }
+
+                if (workingHost != null)
+                {
+                    string err;
+                    long ticks;
+                    var deadline = DateTime.UtcNow.AddMilliseconds(UpPhaseCapMs);
+                    long sent = OoklaUpload(workingHost, deadline, out ticks, out err);
+                    double seconds = (double)ticks / Stopwatch.Frequency;
+                    if (sent > 0 && seconds > 0.0001)
+                    {
+                        result.UpMbps = sent * 8.0 / seconds / 1e6;
+                        ClearError(result, "up:");
+                    }
+                }
+                if (result.UpMbps <= 0)
+                    AppendError(result, "ookla up: no data");
+            }
+
+            // Surface the source so the dashboard shows where the number came from.
+            if ((needDown && result.DownMbps > 0) || (needUp && result.UpMbps > 0))
+            {
+                string label = "Ookla" + (string.IsNullOrEmpty(name) ? "" : " " + name);
+                result.Server = string.IsNullOrEmpty(result.Server)
+                    ? label
+                    : result.Server + " / " + label;
+            }
+        }
+
+        /// <summary>
+        /// Fetches the Ookla server list (nearest first) and extracts host values
+        /// by plain string scanning — no JSON library is available. Returns up to
+        /// ~8 "ip:port" hosts and the display name of the first server.
+        /// </summary>
+        private static System.Collections.Generic.List<string> DiscoverOoklaHosts(out string name)
+        {
+            name = null;
+            var hosts = new System.Collections.Generic.List<string>();
+            string body = null;
+            try
+            {
+                var req = NewRequest(OoklaServersUrl, "GET",
+                    OoklaDiscoveryTimeoutMs, OoklaDiscoveryTimeoutMs);
+                using (var resp = (HttpWebResponse)req.GetResponse())
+                using (var s = resp.GetResponseStream())
+                using (var sr = new StreamReader(s))
+                    body = sr.ReadToEnd();
+            }
+            catch
+            {
+                // Discovery failure leaves the list empty; caller reports it.
+                return hosts;
+            }
+
+            if (string.IsNullOrEmpty(body)) return hosts;
+
+            // Display name from the first object's "sponsor" (preferred) or "name".
+            name = ExtractFirstJsonString(body, "\"sponsor\":\"");
+            if (string.IsNullOrEmpty(name))
+                name = ExtractFirstJsonString(body, "\"name\":\"");
+
+            // Collect host values: scan each occurrence of  "host":"  up to the next quote.
+            const string token = "\"host\":\"";
+            int pos = 0;
+            while (hosts.Count < 8)
+            {
+                int start = body.IndexOf(token, pos, StringComparison.Ordinal);
+                if (start < 0) break;
+                start += token.Length;
+                int end = body.IndexOf('"', start);
+                if (end < 0) break;
+                string host = body.Substring(start, end - start).Trim();
+                if (!string.IsNullOrEmpty(host) && !hosts.Contains(host))
+                    hosts.Add(host);
+                pos = end + 1;
+            }
+            return hosts;
+        }
+
+        /// <summary>Returns the first JSON string value following <paramref name="token"/>, or null.</summary>
+        private static string ExtractFirstJsonString(string body, string token)
+        {
+            int start = body.IndexOf(token, StringComparison.Ordinal);
+            if (start < 0) return null;
+            start += token.Length;
+            int end = body.IndexOf('"', start);
+            if (end < 0) return null;
+            return body.Substring(start, end - start).Trim();
+        }
+
+        /// <summary>
+        /// Downloads from an Ookla server's /download endpoint into a throwaway
+        /// buffer, counting bytes, bounded by the deadline and per-request timeouts.
+        /// Returns the byte count (0 on failure). Never throws.
+        /// </summary>
+        private static long OoklaDownload(string host, DateTime deadline, out string err)
+        {
+            long bytes = 0;
+            err = null;
+            try
+            {
+                string url = "http://" + host + "/download?nocache=" +
+                    DateTime.UtcNow.Ticks.ToString(CultureInfo.InvariantCulture) +
+                    "&size=" + OoklaDownloadBytes.ToString(CultureInfo.InvariantCulture);
+                var req = NewRequest(url, "GET",
+                    RequestTimeoutMs, MeasuredPhaseRwTimeoutMs, "ookdl");
+                using (var resp = (HttpWebResponse)req.GetResponse())
+                using (var s = resp.GetResponseStream())
+                {
+                    var buf = new byte[ReadBufferSize];
+                    int n;
+                    while ((n = s.Read(buf, 0, buf.Length)) > 0)
+                    {
+                        bytes += n;
+                        if (DateTime.UtcNow >= deadline) break;
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                err = Short(ex);
+            }
+            return bytes;
+        }
+
+        /// <summary>
+        /// Chunked POST to an Ookla server's /upload endpoint, timing only the body
+        /// write loop. Returns bytes flushed (0 on failure). Never throws.
+        /// </summary>
+        private static long OoklaUpload(string host, DateTime deadline, out long elapsedTicks, out string err)
+        {
+            long sent = 0;
+            elapsedTicks = 0;
+            err = null;
+            try
+            {
+                string url = "http://" + host + "/upload?nocache=" +
+                    DateTime.UtcNow.Ticks.ToString(CultureInfo.InvariantCulture);
+                var req = NewRequest(url, "POST",
+                    RequestTimeoutMs, MeasuredPhaseRwTimeoutMs, "ookul");
+                req.ContentType = "application/octet-stream";
+                req.SendChunked = true;
+                req.AllowWriteStreamBuffering = false;
+
+                var buf = new byte[ReadBufferSize]; // zero-filled payload
+                using (var s = req.GetRequestStream())
+                {
+                    var sw = Stopwatch.StartNew();
+                    long remaining = UpChunkBytes;
+                    while (remaining > 0)
+                    {
+                        int chunk = (int)Math.Min(buf.Length, remaining);
+                        s.Write(buf, 0, chunk);
+                        s.Flush();
+                        sent += chunk;
+                        remaining -= chunk;
+                        if (DateTime.UtcNow >= deadline) break;
+                    }
+                    sw.Stop();
+                    elapsedTicks = sw.ElapsedTicks;
+                }
+                // Drain/discard the response so the connection can be reused.
+                using (var resp = (HttpWebResponse)req.GetResponse())
+                using (var rs = resp.GetResponseStream())
+                    DrainAndDiscard(rs);
+            }
+            catch (Exception ex)
+            {
+                elapsedTicks = 0;
+                err = Short(ex);
+                return 0;
+            }
+            return sent;
+        }
+
         private static HttpWebRequest NewRequest(string url, string method,
             int timeoutMs = RequestTimeoutMs, int readWriteTimeoutMs = RequestTimeoutMs,
             string connectionGroup = null)
@@ -446,6 +691,25 @@ namespace NetWatch
         {
             if (string.IsNullOrEmpty(r.Error)) r.Error = msg;
             else r.Error = r.Error + "; " + msg;
+        }
+
+        /// <summary>
+        /// Removes stale "; "-joined error segments starting with <paramref name="prefix"/>
+        /// (e.g. "down:" / "up:") once that direction has been filled by the Ookla
+        /// fallback. Re-joins the survivors, or nulls Error when none remain.
+        /// </summary>
+        private static void ClearError(SpeedResult r, string prefix)
+        {
+            if (string.IsNullOrEmpty(r.Error)) return;
+            var parts = r.Error.Split(new[] { "; " }, StringSplitOptions.None);
+            var kept = new System.Collections.Generic.List<string>(parts.Length);
+            foreach (var p in parts)
+            {
+                if (string.IsNullOrEmpty(p)) continue;
+                if (p.StartsWith(prefix, StringComparison.Ordinal)) continue;
+                kept.Add(p);
+            }
+            r.Error = kept.Count == 0 ? null : string.Join("; ", kept);
         }
 
         private static string Short(Exception ex)

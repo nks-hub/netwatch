@@ -33,6 +33,11 @@ namespace NetWatch
             }
         }
 
+        // Last rendered console size, so a resize can trigger one full clear before
+        // the in-place redraw (otherwise a wider/taller previous frame leaves artifacts).
+        private static int _lastWidth = -1;
+        private static int _lastHeight = -1;
+
         public static void Render(Snapshot snap, Config cfg, DateTime startedUtc)
         {
             if (snap == null || cfg == null) return;
@@ -45,15 +50,36 @@ namespace NetWatch
                     height = Console.WindowHeight;
                 }
                 catch { return; }
-                if (width <= 0 || height <= 0) return;
+                // A 0- or 1-wide/tall window leaves no usable area; skip this frame.
+                if (width <= 1 || height <= 1) return;
 
-                var lines = Build(snap, cfg, startedUtc, width);
+                // Detect a resize between frames: one full clear wipes any stale wider/
+                // taller frame, then re-hide the cursor (Clear can make it reappear).
+                if (width != _lastWidth || height != _lastHeight)
+                {
+                    try { Console.Clear(); } catch { }
+                    try { Console.CursorVisible = false; } catch { }
+                    _lastWidth = width;
+                    _lastHeight = height;
+                }
+
+                // Reserve the final column so a full-width line never wraps/scrolls
+                // the buffer (which would destroy the SetCursorPosition(0,0) redraw).
+                // WriteLinePadded enforces the same (width-1) cap when writing.
+                int buildWidth = Math.Max(1, width - 1);
+
+                // Build the frame to the reduced width so the box geometry
+                // (inner = buildWidth-2) leaves the reserved column free and the right
+                // border is never the char that gets truncated at write time.
+                var lines = Build(snap, cfg, startedUtc, buildWidth);
 
                 try { Console.SetCursorPosition(0, 0); } catch { }
 
                 ConsoleColor baseColor;
                 try { baseColor = Console.ForegroundColor; } catch { baseColor = ConsoleColor.Gray; }
 
+                // Never write more rows than fit; the last row stays clear so the final
+                // line write can't wrap into a scroll either.
                 int max = Math.Max(0, height - 1);
                 int count = Math.Min(lines.Count, max);
                 for (int i = 0; i < count; i++)
@@ -445,16 +471,22 @@ namespace NetWatch
 
         private static void WriteLinePadded(string text, ConsoleColor color, int width, ConsoleColor baseColor)
         {
+            // Pad/truncate to (width-1), never the full width: a line that exactly fills
+            // the console width moves the cursor to the next row and SCROLLS the buffer,
+            // which destroys the in-place SetCursorPosition(0,0) redraw (most visible while
+            // resizing). Leaving the final column empty keeps every write on its own row.
+            if (width <= 1) return;
+            int target = width - 1;
             text = text ?? "";
-            // Truncate to width and pad with spaces so stale chars are cleared.
-            if (text.Length > width)
+            // Truncate to target and pad with spaces so stale chars are cleared.
+            if (text.Length > target)
             {
-                int cut = width;
+                int cut = target;
                 // Don't split a surrogate pair (would render a broken glyph).
                 if (cut > 0 && char.IsHighSurrogate(text[cut - 1])) cut--;
                 text = text.Substring(0, cut);
             }
-            if (text.Length < width) text = text + new string(' ', width - text.Length);
+            if (text.Length < target) text = text + new string(' ', target - text.Length);
             try { Console.ForegroundColor = color; } catch { }
             try { Console.Write(text); } catch { }
             try { Console.ForegroundColor = baseColor; } catch { }
