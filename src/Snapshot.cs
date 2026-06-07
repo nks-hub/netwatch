@@ -38,6 +38,12 @@ namespace NetWatch
         public int SessionLost { get; set; }
         /// <summary>Worst (maximum) RTT in ms observed for this target this session (0 when none).</summary>
         public double SessionMaxMs { get; set; }
+
+        /// <summary>The first configured window (the live "current" view), or null when none.</summary>
+        public WindowStat First()
+        {
+            return (Windows != null && Windows.Length > 0) ? Windows[0] : null;
+        }
     }
 
     /// <summary>Immutable copy of all aggregated state, safe to hand to UI and log writer.</summary>

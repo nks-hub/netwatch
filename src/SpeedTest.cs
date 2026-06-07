@@ -219,7 +219,10 @@ namespace NetWatch
             sw.Stop();
 
             long total = 0;
-            for (int i = 0; i < DownStreams; i++) total += counts[i];
+            // Only read a slot whose task has finished; a still-running task may
+            // still be writing counts[i], so an incomplete index contributes 0.
+            for (int i = 0; i < DownStreams; i++)
+                if (tasks[i].IsCompleted) total += counts[i];
 
             double seconds = sw.Elapsed.TotalSeconds;
             if (total > 0 && seconds > 0.0001)
@@ -282,8 +285,12 @@ namespace NetWatch
 
             long total = 0;
             long maxTicks = 0;
+            // Only read a slot whose task has finished; a still-running task may
+            // still be writing counts[i]/elapsedTicks[i], so an incomplete index
+            // contributes nothing.
             for (int i = 0; i < UpStreams; i++)
             {
+                if (!tasks[i].IsCompleted) continue;
                 total += counts[i];
                 if (counts[i] > 0 && elapsedTicks[i] > maxTicks) maxTicks = elapsedTicks[i];
             }
@@ -311,9 +318,9 @@ namespace NetWatch
                 req.AllowWriteStreamBuffering = false;
 
                 var buf = new byte[ReadBufferSize]; // zero-filled payload
-                var sw = Stopwatch.StartNew();
                 using (var s = req.GetRequestStream())
                 {
+                    var sw = Stopwatch.StartNew();
                     long remaining = size;
                     while (remaining > 0)
                     {
@@ -324,9 +331,9 @@ namespace NetWatch
                         remaining -= chunk;
                         if (DateTime.UtcNow >= deadline) break;
                     }
+                    sw.Stop();
+                    elapsedTicks = sw.ElapsedTicks;
                 }
-                sw.Stop();
-                elapsedTicks = sw.ElapsedTicks;
                 // Read and discard the response so the connection can be reused.
                 // Excluded from timing above (it is a full server round-trip).
                 using (var resp = (HttpWebResponse)req.GetResponse())

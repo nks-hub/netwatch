@@ -233,7 +233,7 @@ namespace NetWatch
                     foreach (var ts in targets)
                     {
                         if (ts == null) continue;
-                        WindowStat first = FirstWindow(ts);
+                        WindowStat first = ts.First();
                         WindowStat longest = LongestWindow(ts);
                         var sb = new StringBuilder();
                         sb.Append("  ").Append(PadRight(ts.Target ?? "?", 22));
@@ -430,16 +430,10 @@ namespace NetWatch
         // literally named "Ethernet" prints once, not "Ethernet Ethernet").
         private static string LinkLabel(InterfaceSample a)
         {
-            string kind = a.Kind == LinkKind.WiFi ? "Wi-Fi" : a.Kind == LinkKind.Vpn ? "VPN" : a.Kind.ToString();
+            string kind = Display.KindWord(a.Kind);
             string name = a.Name ?? "";
             if (name.Length == 0 || name.IndexOf(kind, StringComparison.OrdinalIgnoreCase) >= 0) return kind;
             return kind + " \"" + name + "\"";
-        }
-
-        private static WindowStat FirstWindow(TargetSnapshot ts)
-        {
-            var ws = ts.Windows;
-            return (ws != null && ws.Length > 0) ? ws[0] : null;
         }
 
         private static WindowStat LongestWindow(TargetSnapshot ts)

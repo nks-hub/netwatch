@@ -148,7 +148,7 @@ namespace NetWatch
                 if (string.IsNullOrEmpty(s.Gateway)) continue;
                 if (string.IsNullOrEmpty(s.IpAddress)) continue;
 
-                int score = ScoreCandidate(s, best);
+                int score = ScoreCandidate(s);
 
                 if (best == null || score > bestScore)
                 {
@@ -477,7 +477,7 @@ namespace NetWatch
 
         // ---- candidate scoring -------------------------------------------------
 
-        private static int ScoreCandidate(InterfaceSample s, InterfaceSample _)
+        private static int ScoreCandidate(InterfaceSample s)
         {
             int score = 0;
             // Strongly prefer non-VPN adapters as the default route bearer.
@@ -779,8 +779,8 @@ namespace NetWatch
         [StructLayout(LayoutKind.Sequential)]
         private struct WLAN_SECURITY_ATTRIBUTES
         {
-            [MarshalAs(UnmanagedType.I1)] public bool bSecurityEnabled;
-            [MarshalAs(UnmanagedType.I1)] public bool bOneXEnabled;
+            public bool bSecurityEnabled;
+            public bool bOneXEnabled;
             public int dot11AuthAlgorithm;
             public int dot11CipherAlgorithm;
         }

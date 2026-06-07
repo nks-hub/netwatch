@@ -12,7 +12,7 @@ namespace NetWatch
     /// </summary>
     public sealed class Aggregator
     {
-        private const int MaxSamplesPerTarget = 5000;
+        private const int MinSamplesPerTarget = 5000;
         private const int RecentEventsCap = 12;
         private const int DrainQueueCap = 256;
         private const int NoSignalSentinel = 101;
@@ -30,6 +30,7 @@ namespace NetWatch
         private readonly Config _cfg;
         private readonly int[] _windowsSec;
         private readonly long _maxWindowTicks;
+        private readonly int _maxSamples;
         private readonly int _sparkLen;
         private readonly int _wifiWeakPct;
         private readonly double _highLatencyMs;
@@ -82,6 +83,19 @@ namespace NetWatch
                 if (t > maxTicks) maxTicks = t;
             }
             _maxWindowTicks = maxTicks > 0 ? maxTicks : TimeSpan.FromSeconds(60).Ticks;
+
+            // Derive the per-target sample-count cap from how many samples the largest
+            // configured window can legitimately hold at the configured ping interval.
+            // A fixed cap (e.g. 5000) would silently drop the oldest samples of the
+            // largest window when ping_interval_ms is small (e.g. 500 ms over a 3600 s
+            // window needs 7200 samples), corrupting Count/Loss/Avg/P95. The time-based
+            // prune already bounds memory per window; this only raises the count ceiling
+            // so it can never truncate the legitimate largest window. Keep 5000 as a floor.
+            long pingMs = _cfg.PingIntervalMs > 0 ? _cfg.PingIntervalMs : 1000;
+            long windowSamples = _maxWindowTicks / TimeSpan.FromMilliseconds(pingMs).Ticks;
+            _maxSamples = (int)Math.Min(
+                int.MaxValue,
+                Math.Max(MinSamplesPerTarget, windowSamples + windowSamples / 5 + 16)); // +20% headroom
 
             _sparkLen = _cfg.SparkLen > 0 ? _cfg.SparkLen : 40;
             _wifiWeakPct = _cfg.WifiWeakSignalPct;
@@ -494,8 +508,10 @@ namespace NetWatch
             while (drop < samples.Count && samples[drop].TimeTicks < cutoff) drop++;
             if (drop > 0) samples.RemoveRange(0, drop);
 
-            // Bound by count to cap memory regardless of sample rate.
-            int over = samples.Count - MaxSamplesPerTarget;
+            // Bound by count to cap memory regardless of sample rate. The cap is
+            // derived from the largest window + headroom so it never truncates the
+            // legitimate largest window (see constructor).
+            int over = samples.Count - _maxSamples;
             if (over > 0) samples.RemoveRange(0, over);
         }
 

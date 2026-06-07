@@ -15,9 +15,9 @@ namespace NetWatch
     /// </summary>
     public static class Program
     {
-        private const string Version = "1.0.0";
-        private const string Repo = "https://github.com/nks-hub/netwatch";
-        private const string Author = "LuRy <lury@lury.cz>";
+        private const string Version = BuildInfo.Version;
+        private const string Repo = BuildInfo.Repo;
+        private const string Author = BuildInfo.Author;
 
         /// <summary>
         /// True while a speed test is saturating the link. The ping and traceroute
@@ -792,7 +792,7 @@ namespace NetWatch
         {
             if (a == null) return "active link: (none detected)";
             var sb = new System.Text.StringBuilder();
-            string kindWord = a.Kind == LinkKind.WiFi ? "Wi-Fi" : a.Kind == LinkKind.Vpn ? "VPN" : a.Kind.ToString();
+            string kindWord = Display.KindWord(a.Kind);
             string name = a.Name ?? "";
             sb.Append("active link: ").Append(kindWord);
             if (name.Length > 0 && name.IndexOf(kindWord, StringComparison.OrdinalIgnoreCase) < 0)

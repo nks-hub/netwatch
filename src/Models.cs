@@ -151,4 +151,22 @@ namespace NetWatch
         /// <summary>Tunnel-side gateway, used as a ping target to measure tunnel latency.</summary>
         public string Gateway { get; set; }
     }
+
+    /// <summary>Single source of truth for version and attribution metadata.</summary>
+    internal static class BuildInfo
+    {
+        public const string Version = "1.0.0";
+        public const string Repo = "https://github.com/nks-hub/netwatch";
+        public const string Author = "LuRy <lury@lury.cz>";
+    }
+
+    /// <summary>Display helpers shared across the dashboard, log and reports.</summary>
+    internal static class Display
+    {
+        /// <summary>Human display word for a link kind (Wi-Fi / VPN / Ethernet / ...).</summary>
+        public static string KindWord(LinkKind k)
+        {
+            return k == LinkKind.WiFi ? "Wi-Fi" : k == LinkKind.Vpn ? "VPN" : k.ToString();
+        }
+    }
 }
