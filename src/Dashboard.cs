@@ -307,6 +307,7 @@ namespace NetWatch
             var targets = snap.Targets ?? new TargetSnapshot[0];
             string worst = null;
             double worstAvg = -1;
+            bool firstRow = true;
             foreach (var ts in targets)
             {
                 if (ts == null) continue;
@@ -334,6 +335,8 @@ namespace NetWatch
                 else if (lossPct > 0 || avgMs > cfg.HighLatencyMs) color = ConsoleColor.Yellow;
                 bool emphasize = ts.Kind == TargetKind.Gateway || ts.Kind == TargetKind.Vpn;
                 if (emphasize && color == ConsoleColor.Green) color = ConsoleColor.Cyan;
+                if (!firstRow) outp.Add(new Line(Card("", cw), ConsoleColor.DarkGray)); // blank spacer between rows
+                firstRow = false;
                 outp.Add(new Line(Card(sb.ToString(), cw), color));
 
                 if (avgMs > worstAvg) { worstAvg = avgMs; worst = label; }
