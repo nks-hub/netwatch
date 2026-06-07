@@ -112,8 +112,6 @@ namespace NetWatch
                 // border is never the char that gets truncated at write time.
                 var lines = Build(snap, cfg, startedUtc, buildWidth);
 
-                try { Console.SetCursorPosition(0, 0); } catch { }
-
                 ConsoleColor baseColor;
                 try { baseColor = Console.ForegroundColor; } catch { baseColor = ConsoleColor.Gray; }
 
@@ -121,14 +119,24 @@ namespace NetWatch
                 // line write can't wrap into a scroll either.
                 int max = Math.Max(0, height - 1);
                 int count = Math.Min(lines.Count, max);
+
+                // Position the cursor explicitly at the start of EACH row before writing it.
+                // With console line-wrap disabled (Init) and each line capped at width-1, the
+                // cursor never auto-advances to the next row, so row advancement must NOT rely
+                // on auto-wrap — set it per row instead. SetCursorPosition is guarded because the
+                // window may be resized/closed mid-draw.
                 for (int i = 0; i < count; i++)
                 {
+                    try { Console.SetCursorPosition(0, i); } catch { }
                     var ln = lines[i];
                     WriteLinePadded(ln.Text, ln.Color, width, baseColor);
                 }
-                // Clear any leftover rows from a taller previous frame.
+                // Clear any leftover rows from a taller previous frame, each at its own row.
                 for (int i = count; i < max; i++)
+                {
+                    try { Console.SetCursorPosition(0, i); } catch { }
                     WriteLinePadded("", baseColor, width, baseColor);
+                }
 
                 try { Console.ForegroundColor = baseColor; } catch { }
             }
