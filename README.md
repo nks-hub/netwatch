@@ -64,6 +64,7 @@ This starts the live dashboard. Press **Ctrl+C** to stop; NetWatch writes a fina
 |------|--------|
 | (none) | Live dashboard with continuous monitoring |
 | `-once` | Run one diagnostic pass (interfaces, 4× ping per target, one traceroute, one speed test), print a plain-text report, then exit. Ideal for attaching to a ticket. |
+| `-frame` | Print one live dashboard frame to stdout and exit (capturable / pipeable status snapshot) |
 | `-no-ui` | Continuous monitoring without the live dashboard (e.g. when redirecting output) |
 | `-config <path>` | Use the given config file (default: `netwatch.conf` beside the EXE) |
 | `-logdir <path>` | Override the log/CSV output directory |

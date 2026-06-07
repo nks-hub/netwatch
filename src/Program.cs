@@ -44,6 +44,7 @@ namespace NetWatch
             string logDirOverride = null;
             bool once = false;
             bool noUi = false;
+            bool frame = false;
 
             for (int i = 0; i < args.Length; i++)
             {
@@ -78,6 +79,11 @@ namespace NetWatch
                     case "--no-ui":
                     case "-noui":
                         noUi = true;
+                        break;
+                    case "-frame":
+                    case "--frame":
+                    case "-status":
+                        frame = true;
                         break;
                     case "-version":
                     case "--version":
@@ -155,6 +161,8 @@ namespace NetWatch
 
             try
             {
+                if (frame)
+                    return RunFrame(cfg, agg, log, thState, targets);
                 if (once)
                     return RunOnce(cfg, agg, log, thState, targets);
                 return RunContinuous(cfg, agg, log, thState, targets, noUi);
@@ -277,6 +285,47 @@ namespace NetWatch
             foreach (var line in text.Split('\n'))
                 log.Event("  " + line.TrimEnd('\r'));
             log.Summary(agg.Snapshot());
+            FlushEvents(agg, log);
+            return 0;
+        }
+
+        // =====================================================================
+        //  Single status frame (renders one dashboard frame to stdout, then exits)
+        // =====================================================================
+
+        private static int RunFrame(Config cfg, Aggregator agg, LogWriter log,
+            ThroughputState thState, List<Target> targets)
+        {
+            try { Console.OutputEncoding = System.Text.Encoding.UTF8; } catch { }
+
+            // Sample interfaces twice (1s apart) for throughput deltas + VPN detection.
+            try
+            {
+                NetInfo.Sample(thState);
+                Thread.Sleep(1000);
+                var scan = NetInfo.Sample(thState);
+                var active = NetInfo.Active(scan);
+                var vpn = NetInfo.DetectVpn(scan);
+                agg.AddInterfaces(scan, active, vpn);
+                if (active != null) log.Interface(active);
+            }
+            catch { }
+
+            // A few pings per target to populate the live stats (no speed test here).
+            for (int round = 0; round < 4; round++)
+            {
+                foreach (var t in targets)
+                {
+                    PingSample s;
+                    try { s = Pinger.Ping(t.Label, t.Addr, t.Kind, cfg.PingTimeoutMs); }
+                    catch (Exception ex) { s = FailedSample(t, ex.Message); }
+                    agg.AddPing(s);
+                    log.Ping(s);
+                }
+                Thread.Sleep(200);
+            }
+
+            Console.Write(Dashboard.RenderToText(agg.Snapshot(), cfg, DateTime.UtcNow, 100));
             FlushEvents(agg, log);
             return 0;
         }
@@ -931,6 +980,7 @@ namespace NetWatch
             Console.WriteLine("                   (default: netwatch.conf next to the EXE)");
             Console.WriteLine("  -logdir <path>   Override the log/CSV output directory");
             Console.WriteLine("  -once            Run a single diagnostic pass, print a report, exit");
+            Console.WriteLine("  -frame           Print one live dashboard frame to stdout and exit");
             Console.WriteLine("  -no-ui           Continuous monitoring without the live dashboard");
             Console.WriteLine("  -version         Print version and exit");
             Console.WriteLine("  -h, -help        Show this help and exit");

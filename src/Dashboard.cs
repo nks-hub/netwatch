@@ -11,6 +11,8 @@ namespace NetWatch
     public static class Dashboard
     {
         private static readonly char[] Blocks = { '▁', '▂', '▃', '▄', '▅', '▆', '▇', '█' };
+        private const string Repo = "https://github.com/nks-hub/netwatch";
+        private const string Author = "LuRy <lury@lury.cz>";
 
         public static void Init()
         {
@@ -68,6 +70,21 @@ namespace NetWatch
             catch { /* window may have been resized/closed mid-draw */ }
         }
 
+        /// <summary>
+        /// Renders one dashboard frame to a plain text string (no cursor control),
+        /// so a single status snapshot can be printed to stdout, piped, or logged
+        /// even when there is no interactive console.
+        /// </summary>
+        public static string RenderToText(Snapshot snap, Config cfg, DateTime startedUtc, int width)
+        {
+            if (snap == null || cfg == null) return "";
+            if (width <= 0) width = 100;
+            var sb = new StringBuilder();
+            foreach (var ln in Build(snap, cfg, startedUtc, width))
+                sb.AppendLine(ln.Text);
+            return sb.ToString();
+        }
+
         // ---- frame construction ----
 
         private sealed class Line
@@ -90,6 +107,7 @@ namespace NetWatch
                            up.Seconds.ToString("00", CultureInfo.InvariantCulture);
             string now = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture);
             outp.Add(new Line("NetWatch v1.0  up " + upStr + "  " + now + "   log:" + (cfg.LogDir ?? "logs"), ConsoleColor.White));
+            outp.Add(new Line(Repo + "   " + Author, ConsoleColor.DarkGray));
             outp.Add(new Line("", def));
 
             // Active link
@@ -118,10 +136,6 @@ namespace NetWatch
             int start = Math.Max(0, ev.Length - 6);
             for (int i = start; i < ev.Length; i++)
                 outp.Add(new Line("  " + ev[i], ConsoleColor.DarkGray));
-
-            // Footer attribution
-            outp.Add(new Line("", def));
-            outp.Add(new Line("https://github.com/nks-hub/netwatch   LuRy <lury@lury.cz>", ConsoleColor.DarkGray));
 
             return outp;
         }
@@ -178,6 +192,7 @@ namespace NetWatch
             sb.Append(v.Connected ? "CONNECTED" : "DISCONNECTED");
             if (!string.IsNullOrEmpty(v.IpAddress)) sb.Append("  ip ").Append(v.IpAddress);
             if (!string.IsNullOrEmpty(v.Gateway)) sb.Append("  gw ").Append(v.Gateway);
+            else if (v.Connected) sb.Append("  (no tunnel gateway exposed - set vpn_targets)");
             outp.Add(new Line(sb.ToString(), v.Connected ? ConsoleColor.Green : ConsoleColor.Red));
         }
 
