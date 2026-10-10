@@ -36,7 +36,7 @@ NetWatch is a single self-contained `netwatch.exe` built on **.NET Framework 4.8
 
 ## Installation
 
-Download `netwatch.exe` (and the optional `netwatch.exe.config`) from [GitHub Releases](https://github.com/nks-hub/netwatch/releases) and copy it onto the affected PC. Nothing else is needed. To build it yourself, see [Development](#development).
+Download `netwatch.exe` and `netwatch.exe.config` from [GitHub Releases](https://github.com/nks-hub/netwatch/releases) and copy them side by side onto the affected PC. Nothing else is needed. To build it yourself, see [Development](#development).
 
 ## Usage
 
