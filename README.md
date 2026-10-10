@@ -1,6 +1,12 @@
 # NetWatch
 
-A portable, no-install, no-admin Windows console tool that pinpoints **where** a "slow VPN" or "slow network" complaint actually comes from — the local NIC (including Wi-Fi signal), the router/gateway, the internet, or the VPN tunnel — and proves it with timestamped logs and daily CSV aggregation.
+[![build](https://github.com/nks-hub/netwatch/actions/workflows/build.yml/badge.svg)](https://github.com/nks-hub/netwatch/actions/workflows/build.yml)
+[![GitHub Release](https://img.shields.io/github/v/release/nks-hub/netwatch)](https://github.com/nks-hub/netwatch/releases)
+[![.NET Framework](https://img.shields.io/badge/.NET%20Framework-4.8-512BD4.svg)](https://dotnet.microsoft.com/download/dotnet-framework/net48)
+[![Platform](https://img.shields.io/badge/platform-Windows%2010%20%7C%2011-0078D4.svg)](#requirements)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+
+> A portable, no-install, no-admin Windows console tool that pinpoints **where** a "slow VPN" or "slow network" complaint actually comes from — the local NIC (including Wi-Fi signal), the router/gateway, the internet, or the VPN tunnel — and proves it with timestamped logs and daily CSV aggregation.
 
 NetWatch is a single self-contained `netwatch.exe` built on **.NET Framework 4.8**, which ships in-box on every stock Windows 10 and Windows 11 machine. Copy it onto an affected user's PC, run it as a normal user, watch the live dashboard, and the logs tell you which layer is genuinely at fault.
 
@@ -13,39 +19,14 @@ NetWatch is a single self-contained `netwatch.exe` built on **.NET Framework 4.8
 ╰─ Wi-Fi · up ─────────────────────────────────────────────────────╯
 ```
 
-## What it measures
+## Features
 
-NetWatch runs every diagnostic layer concurrently and attributes latency to the precise hop.
-
-| Layer | How |
-|-------|-----|
-| Local NIC / Wi-Fi | Active adapter, link speed, recv/send throughput, error/discard counters; for Wi-Fi: SSID, signal quality %, approximate RSSI (dBm), negotiated rx/tx rate, PHY type (802.11a/b/g/n/ac/ax) and channel |
-| Router / Gateway | Continuous ICMP ping to the auto-detected default gateway |
-| ISP / Internet | Continuous ping to configurable public anchors + a periodic speed test |
-| DNS | Ping to the active adapter's first DNS server |
-| VPN tunnel | Ping to the auto-detected tunnel gateway, the configured VPN public endpoint, and internal in-tunnel hosts |
-| Path | Periodic traceroute with reverse DNS and route-change detection |
-
-## Highlights
-
-- **Native ICMP ping, no admin.** Uses `System.Net.NetworkInformation.Ping` (the OS ICMP helper, not raw sockets) to continuously probe each target. RTT is taken from the OS-observed round-trip, not wall-clock, so latency is never inflated. Per-target last/avg/max/jitter/p95, loss %, session max ping and drop count are tracked separately so you can see exactly which hop is slow.
-- **Vendor-agnostic VPN auto-detection.** Finds a VPN adapter generically — WireGuard, OpenVPN, Fortinet/FortiClient, Cisco AnyConnect, GlobalProtect, Zscaler, Pulse Secure, SonicWall, Check Point, Sophos, NordLynx, Proton VPN, Mullvad, Tailscale, ZeroTier, and WAN Miniport / TAP — without hardcoding any endpoint. When the tunnel gateway is not exposed by the adapter (e.g. WireGuard-style /32 peers), it is recovered from the IPv4 route table; for split-tunnel /24 peers with no off-link route it derives the conventional tunnel-server host from the live subnet. A VPN that connects *after* launch is picked up and monitored automatically.
-- **Traceroute with reverse DNS and route-change detection.** Periodic TTL-limited traceroute to a configurable target, resolving each hop's hostname and flagging when the path changes between runs.
-- **A speed test that doesn't lie.** Measures download, upload, unloaded latency and jitter against Cloudflare's public speed endpoints over ordinary outbound HTTPS (port 443, honouring the system/corporate proxy). The ping and traceroute loops are **paused while the test saturates the link** (plus a short drain margin), so the test's own bufferbloat is never recorded as packet loss or elevated RTT. On failure it reports a concrete reason (e.g. `HTTP 429`, `network: Timeout`) and falls back first to a single fresh stream, then to the nearest **Ookla Speedtest** server as a second source — and labels which source produced each number.
-- **Live "all-cards" dashboard.** A console UI that is resize-robust and responsive, redrawing in place. See below.
-- **Full logging.** A human-readable session log, four daily CSVs, and periodic SUMMARY blocks for IT to review.
-
-## The live dashboard
-
-Running `netwatch.exe` with no arguments opens the live dashboard, a stack of titled cards:
-
-- **Header card** — product line, author/repo, uptime, wall-clock, and the active log directory.
-- **LINK card** — the active adapter with its IP and link speed; a Wi-Fi line with SSID, a signal bar, signal %, RSSI and rx/tx rate; a throughput line (recv/send Mbps plus in/out error counters); and the merged **VPN status** (vendor, CONNECTED/DISCONNECTED, IP and tunnel gateway).
-- **TARGETS card** — the aligned ping table: `Target / Last / Avg / Max / Loss / Drops / Jit / P95` plus a per-target latency **sparkline**. `Max` and `Drops` are per-target session totals. Rows recolour by health (green / yellow / red), and the gateway and VPN rows are emphasised.
-- **SPEEDTEST card** — download/upload **bar gauges** on a shared auto-scaled axis (with a tick at the session peak), unloaded latency and jitter, the measuring server/colo, session averages, test count, and a "next in" countdown.
-- **TRACE / EVENTS card** — the last traceroute summary (target, hop count, time, path stable/CHANGED) and the most recent diagnostic events.
-
-The dashboard is rendered with the Console API (cursor positioning + colours), so it is locale- and ANSI-independent and survives window resizes cleanly.
+- 📡 **Native ICMP ping, no admin** - Uses `System.Net.NetworkInformation.Ping` (the OS ICMP helper, not raw sockets) to continuously probe each target. RTT is taken from the OS-observed round-trip, not wall-clock, so latency is never inflated. Per-target last/avg/max/jitter/p95, loss %, session max ping and drop count are tracked separately so you can see exactly which hop is slow.
+- 🔐 **Vendor-agnostic VPN auto-detection** - Finds a VPN adapter generically — WireGuard, OpenVPN, Fortinet/FortiClient, Cisco AnyConnect, GlobalProtect, Zscaler, Pulse Secure, SonicWall, Check Point, Sophos, NordLynx, Proton VPN, Mullvad, Tailscale, ZeroTier, and WAN Miniport / TAP — without hardcoding any endpoint. When the tunnel gateway is not exposed by the adapter (e.g. WireGuard-style /32 peers), it is recovered from the IPv4 route table; for split-tunnel /24 peers with no off-link route it derives the conventional tunnel-server host from the live subnet. A VPN that connects *after* launch is picked up and monitored automatically.
+- 🧭 **Traceroute with reverse DNS and route-change detection** - Periodic TTL-limited traceroute to a configurable target, resolving each hop's hostname and flagging when the path changes between runs.
+- ⚡ **A speed test that doesn't lie** - Measures download, upload, unloaded latency and jitter against Cloudflare's public speed endpoints over ordinary outbound HTTPS (port 443, honouring the system/corporate proxy). The ping and traceroute loops are **paused while the test saturates the link** (plus a short drain margin), so the test's own bufferbloat is never recorded as packet loss or elevated RTT. On failure it reports a concrete reason (e.g. `HTTP 429`, `network: Timeout`) and falls back first to a single fresh stream, then to the nearest **Ookla Speedtest** server as a second source — and labels which source produced each number.
+- 🖥️ **Live "all-cards" dashboard** - A console UI that is resize-robust and responsive, redrawing in place. See [The live dashboard](#the-live-dashboard).
+- 📝 **Full logging** - A human-readable session log, four daily CSVs, and periodic SUMMARY blocks for IT to review.
 
 ## Requirements
 
@@ -53,21 +34,9 @@ The dashboard is rendered with the Console API (cursor positioning + colours), s
 - **No administrator rights.** Runs as a standard user.
 - **No installation, no dependencies** — a single ~100 KB EXE. Copy it and run it.
 
-## Build
+## Installation
 
-Built against **net48** with the .NET SDK (any recent version, with the .NET Framework 4.8 targeting pack installed). No NuGet packages — System.* BCL only.
-
-```powershell
-dotnet build -c Release
-```
-
-Or run the staging script, which builds Release and copies the portable EXE into `dist\`:
-
-```powershell
-.\build.ps1
-```
-
-`build.ps1` prints the path and size of the staged `dist\netwatch.exe`, ready to copy to any Windows 10/11 machine. CI also publishes a prebuilt `netwatch.exe` as a build artifact, so you can grab a ready-to-run binary without building locally.
+Download `netwatch.exe` (and the optional `netwatch.exe.config`) from [GitHub Releases](https://github.com/nks-hub/netwatch/releases) and copy it onto the affected PC. Nothing else is needed. To build it yourself, see [Development](#development).
 
 ## Usage
 
@@ -121,6 +90,31 @@ vpn_server  = vpn.example.com
 vpn_targets = app.example.com, 198.51.100.10
 ```
 
+## What it measures
+
+NetWatch runs every diagnostic layer concurrently and attributes latency to the precise hop.
+
+| Layer | How |
+|-------|-----|
+| Local NIC / Wi-Fi | Active adapter, link speed, recv/send throughput, error/discard counters; for Wi-Fi: SSID, signal quality %, approximate RSSI (dBm), negotiated rx/tx rate, PHY type (802.11a/b/g/n/ac/ax) and channel |
+| Router / Gateway | Continuous ICMP ping to the auto-detected default gateway |
+| ISP / Internet | Continuous ping to configurable public anchors + a periodic speed test |
+| DNS | Ping to the active adapter's first DNS server |
+| VPN tunnel | Ping to the auto-detected tunnel gateway, the configured VPN public endpoint, and internal in-tunnel hosts |
+| Path | Periodic traceroute with reverse DNS and route-change detection |
+
+## The live dashboard
+
+Running `netwatch.exe` with no arguments opens the live dashboard, a stack of titled cards:
+
+- **Header card** — product line, author/repo, uptime, wall-clock, and the active log directory.
+- **LINK card** — the active adapter with its IP and link speed; a Wi-Fi line with SSID, a signal bar, signal %, RSSI and rx/tx rate; a throughput line (recv/send Mbps plus in/out error counters); and the merged **VPN status** (vendor, CONNECTED/DISCONNECTED, IP and tunnel gateway).
+- **TARGETS card** — the aligned ping table: `Target / Last / Avg / Max / Loss / Drops / Jit / P95` plus a per-target latency **sparkline**. `Max` and `Drops` are per-target session totals. Rows recolour by health (green / yellow / red), and the gateway and VPN rows are emphasised.
+- **SPEEDTEST card** — download/upload **bar gauges** on a shared auto-scaled axis (with a tick at the session peak), unloaded latency and jitter, the measuring server/colo, session averages, test count, and a "next in" countdown.
+- **TRACE / EVENTS card** — the last traceroute summary (target, hop count, time, path stable/CHANGED) and the most recent diagnostic events.
+
+The dashboard is rendered with the Console API (cursor positioning + colours), so it is locale- and ANSI-independent and survives window resizes cleanly.
+
 ## Logs and output
 
 By default logs land in a `logs\` folder next to the EXE (override with `log_dir` or `-logdir`). Files rotate by local date, and every record is flushed immediately so data survives an abrupt kill:
@@ -133,8 +127,43 @@ By default logs land in a `logs\` folder next to the EXE (override with `log_dir
 
 Attach the relevant CSVs (or the whole folder) to a support ticket so latency can be located precisely.
 
-## Repository
+## Development
 
-- **GitHub:** https://github.com/nks-hub/netwatch
-- **Author:** LuRy &lt;lury@lury.cz&gt;
-- **License:** [MIT](LICENSE)
+Built against **net48** with the .NET SDK (any recent version, with the .NET Framework 4.8 targeting pack installed). No NuGet packages — System.* BCL only.
+
+```powershell
+dotnet build -c Release
+```
+
+Or run the staging script, which builds Release and copies the portable EXE into `dist\`:
+
+```powershell
+.\build.ps1
+```
+
+`build.ps1` prints the path and size of the staged `dist\netwatch.exe`, ready to copy to any Windows 10/11 machine. CI also publishes a prebuilt `netwatch.exe` as a build artifact, so you can grab a ready-to-run binary without building locally.
+
+## Contributing
+
+Contributions are welcome! For major changes, please open an issue first.
+
+1. Fork the repository
+2. Create your feature branch (`git checkout -b feature/amazing-feature`)
+3. Commit your changes (`git commit -m 'feat: description'`)
+4. Push to the branch (`git push origin feature/amazing-feature`)
+5. Open a Pull Request
+
+## Support
+
+- 📧 **Email:** dev@nks-hub.cz
+- 🐛 **Bug reports:** [GitHub Issues](https://github.com/nks-hub/netwatch/issues)
+
+## License
+
+MIT License — see [LICENSE](LICENSE) for details.
+
+---
+
+<p align="center">
+  Made with ❤️ by <a href="https://github.com/nks-hub">NKS Hub</a>
+</p>
